@@ -38,6 +38,9 @@ require (
 	github.com/cavaliergopher/rpm v1.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dchest/jsmin v0.0.0-20220218165748-59f39799265f // indirect
+	github.com/go-flac/flacpicture/v2 v2.0.2 // indirect
+	github.com/go-flac/flacvorbis/v2 v2.0.2 // indirect
+	github.com/go-flac/go-flac/v2 v2.0.4 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/icza/bitio v1.1.0 // indirect
@@ -71,3 +74,5 @@ require (
 	golift.io/udf v0.0.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+replace golift.io/xtractr => ../xtractr
