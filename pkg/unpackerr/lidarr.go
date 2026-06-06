@@ -45,7 +45,7 @@ func (u *Unpackerr) validateLidarr() error {
 
 func (u *Unpackerr) logLidarr() {
 	if count := len(u.Lidarr); count == 1 {
-		u.Printf(" => Lidarr Config: 1 server: "+starrLogLine+", split_flac:%v",
+		u.Printf(" => Lidarr Config: 1 server: "+starrLogLine+", split_flac(flac,ape,wv,m4a,wav):%v",
 			u.Lidarr[0].URL, u.Lidarr[0].APIKey != "", u.Lidarr[0].Timeout.String(),
 			u.Lidarr[0].ValidSSL, u.Lidarr[0].Protocols, u.Lidarr[0].Syncthing,
 			u.Lidarr[0].DeleteOrig, u.Lidarr[0].DeleteDelay.String(), u.Lidarr[0].Paths,
@@ -54,7 +54,7 @@ func (u *Unpackerr) logLidarr() {
 		u.Printf(" => Lidarr Config: %d servers", count)
 
 		for _, f := range u.Lidarr {
-			u.Printf(starrLogPfx+starrLogLine+", split_flac:%v",
+			u.Printf(starrLogPfx+starrLogLine+", split_flac(flac,ape,wv,m4a,wav):%v",
 				f.URL, f.APIKey != "", f.Timeout.String(), f.ValidSSL, f.Protocols,
 				f.Syncthing, f.DeleteOrig, f.DeleteDelay.String(), f.Paths,
 				f.SplitFlac)
