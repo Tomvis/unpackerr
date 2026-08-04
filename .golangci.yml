@@ -18,6 +18,12 @@ linters:
     - gomodguard # deprecated.
 
   settings:
+    gomoddirectives:
+      # The enhanced fork builds against the sibling xtractr checkout.
+      replace-local: true
+      # Temporary until nwaples/rardecode#62 (RAR5 Linkname) merges.
+      replace-allow-list:
+        - github.com/nwaples/rardecode/v2
     depguard:
       rules:
         main:
