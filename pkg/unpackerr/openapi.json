@@ -1,0 +1,619 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Unpackerr API",
+    "version": "1.0.0",
+    "description": "HTTP API for Unpackerr. Login returns an admin API key and a session cookie. After that, send X-Api-Key (or Authorization: Bearer). This spec contains no secret values."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This Unpackerr instance; url is rewritten to the configured urlbase when the spec is served"
+    }
+  ],
+  "tags": [
+    {"name": "auth"},
+    {"name": "system"},
+    {"name": "queue"},
+    {"name": "history"},
+    {"name": "files"},
+    {"name": "config"}
+  ],
+  "security": [
+    {"apiKey": []},
+    {"bearer": []},
+    {"session": []}
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Api-Key"
+      },
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "session"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {"type": "string"}
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": ["kdf"],
+        "properties": {
+          "name": {"type": "string", "description": "Username; omitted or empty defaults to admin"},
+          "kdf": {"type": "string", "description": "PBKDF2-HMAC-SHA-256(password, salt=\"unpackerr:\"+username, 210000, 32) hex-encoded; never send plaintext"}
+        }
+      },
+      "AuthInfo": {
+        "type": "object",
+        "properties": {
+          "username": {"type": "string"},
+          "apiKey": {"type": "string"},
+          "auth": {"type": "string"},
+          "via": {"type": "string"},
+          "goos": {"type": "string"},
+          "header": {"type": "string", "description": "Configured proxy auth header name (default X-Webauth-User)"},
+          "headers": {
+            "type": "object",
+            "additionalProperties": {"type": "array", "items": {"type": "string"}},
+            "description": "Incoming request headers for the proxy-auth picker, minus the Trust exclusion list (and X-Api-Key / Authorization). Omitted unless the caller has system:headers:read"
+          },
+          "clientIP": {"type": "string", "description": "RemoteAddr host of this request"},
+          "upstreamAllowed": {"type": "boolean", "description": "True when RemoteAddr is in webserver upstreams"},
+          "permissions": {"type": "array", "items": {"type": "string"}}
+        }
+      },
+      "Stats": {
+        "type": "object",
+        "properties": {
+          "waiting": {"type": "integer"},
+          "queued": {"type": "integer"},
+          "extracting": {"type": "integer"},
+          "failed": {"type": "integer"},
+          "extracted": {"type": "integer"},
+          "imported": {"type": "integer"},
+          "deleted": {"type": "integer"},
+          "hookOK": {"type": "integer"},
+          "hookFail": {"type": "integer"},
+          "cmdOK": {"type": "integer"},
+          "cmdFail": {"type": "integer"},
+          "retries": {"type": "integer"},
+          "finished": {"type": "integer"}
+        }
+      },
+      "SystemInfo": {
+        "type": "object",
+        "properties": {
+          "version": {"type": "string"},
+          "revision": {"type": "string"},
+          "started": {"type": "string", "format": "date-time"},
+          "uptime": {"type": "string"},
+          "listenAddr": {"type": "string"},
+          "urlbase": {"type": "string"},
+          "auth": {"type": "string"},
+          "metrics": {"type": "boolean"},
+          "configFile": {"type": "string"},
+          "goos": {"type": "string"}
+        }
+      },
+      "FieldHelp": {
+        "type": "object",
+        "properties": {
+          "short": {"type": "string"},
+          "uishort": {"type": "string"},
+          "desc": {"type": "string"},
+          "env": {"type": "string"}
+        }
+      },
+      "LiveExport": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"}
+        }
+      },
+      "QueueItem": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "app": {"type": "string", "description": "Instance name when set, otherwise the Starr dialect (Sonarr, Radarr, Folder, …)."},
+          "url": {"type": "string"},
+          "path": {"type": "string"},
+          "outputPath": {"type": "string"},
+          "status": {"type": "string"},
+          "retries": {"type": "integer"},
+          "updated": {"type": "string", "format": "date-time"},
+          "progress": {"type": "string"},
+          "error": {"type": "string"}
+        }
+      },
+      "HistoryRecord": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "app": {"type": "string", "description": "Instance name when set, otherwise the Starr dialect (Sonarr, Radarr, Folder, …)."},
+          "url": {"type": "string"},
+          "path": {"type": "string"},
+          "outputPath": {"type": "string"},
+          "status": {"type": "string"},
+          "retries": {"type": "integer"},
+          "started": {"type": "string", "format": "date-time"},
+          "updated": {"type": "string", "format": "date-time"},
+          "finished": {"type": "string", "format": "date-time"},
+          "archives": {"type": "integer"},
+          "files": {"type": "integer"},
+          "bytes": {"type": "integer"},
+          "ratio": {"type": "number"},
+          "elapsed": {"type": "string"},
+          "error": {"type": "string"},
+          "progress": {"type": "string"}
+        }
+      },
+      "IDRequest": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": {"type": "string", "description": "Queue or history item id (usually a filesystem path)"}
+        }
+      },
+      "StatusReply": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string"},
+          "id": {"type": "string"}
+        }
+      },
+      "ConfigWriteReply": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string"},
+          "restartRequired": {"type": "boolean"}
+        }
+      },
+      "BrowseDir": {
+        "type": "object",
+        "properties": {
+          "sep": {"type": "string", "description": "filepath.Separator on this host"},
+          "path": {"type": "string", "description": "Directory being listed; empty on Windows volume-root listing"},
+          "mom": {"type": "string", "description": "Parent directory; empty at a volume root"},
+          "dirs": {"type": "array", "items": {"type": "string"}},
+          "files": {"type": "array", "items": {"type": "string"}},
+          "error": {"type": "string", "description": "Set when the requested path was unreadable but the parent listed successfully"}
+        }
+      },
+      "BrowseCreate": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {"type": "string", "description": "Folder to create (MkdirAll 0755); existing folders succeed"}
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid credentials",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      },
+      "Forbidden": {
+        "description": "Authenticated but missing permission",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      },
+      "BadRequest": {
+        "description": "Invalid JSON or validation error",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      },
+      "GatewayTimeout": {
+        "description": "Request canceled or timed out while waiting on the main loop",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      },
+      "PersistError": {
+        "description": "Failed to write the change to disk; it will not survive a restart",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      }
+    }
+  },
+  "paths": {
+    "/api/openapi.json": {
+      "get": {
+        "tags": ["system"],
+        "summary": "OpenAPI 3 document",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {"application/json": {"schema": {"type": "object"}}}
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Log in with PBKDF2 hex; sets session cookie and returns the admin API key",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Logged in",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AuthInfo"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"description": "Password login is disabled (webauth or noauth)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "500": {"description": "Could not encode the session cookie", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "Clear the session cookie",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Logged out",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StatusReply"}}}
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": ["auth"],
+        "summary": "Current session or API key identity",
+        "description": "headers is included only when the caller has system:headers:read (admin / * included)",
+        "responses": {
+          "200": {
+            "description": "Auth info including apiKey when using a session",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AuthInfo"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "tags": ["system"],
+        "summary": "Queue counts for Homepage and the dashboard",
+        "description": "Requires system:stats:read",
+        "responses": {
+          "200": {
+            "description": "Counts",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Stats"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/system": {
+      "get": {
+        "tags": ["system"],
+        "summary": "Version, uptime, listen address, auth mode, config file path",
+        "description": "Requires system:info:read",
+        "responses": {
+          "200": {
+            "description": "System info",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SystemInfo"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/system/export": {
+      "get": {
+        "tags": ["system"],
+        "summary": "Live config rundown (startup-log style, secrets omitted)",
+        "description": "Requires system:info:read. Same shape of information as the startup log: apps, folders, intervals, webserver. Each section also needs config:{section}:read (or *); otherwise the dump prints an omit line naming the missing permission. API keys are present/absent booleans, UI password is the auth type only.",
+        "responses": {
+          "200": {
+            "description": "Plain-text rundown in JSON",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LiveExport"}}}
+          },
+          "504": {"$ref": "#/components/responses/GatewayTimeout"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/browse": {
+      "get": {
+        "tags": ["files"],
+        "summary": "List files and folders",
+        "description": "Requires system:browse:read. Empty dir expands to the process home directory; on Windows empty, / or \\ lists mounted C:–Z: drives that exist. A file path lists its parent. An unreadable path that has a readable parent returns 200 with error set. Both unreadable is 406. mom is empty at a volume root.",
+        "parameters": [
+          {
+            "name": "dir",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string"},
+            "description": "Directory or file path; ~ is expanded"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory contents",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BrowseDir"}}}
+          },
+          "406": {"description": "Path and parent are unreadable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      },
+      "post": {
+        "tags": ["files"],
+        "summary": "Create a folder",
+        "description": "Requires system:browse:write. Uses MkdirAll 0755. Existing folders succeed. Returns the listing of the new (or existing) folder.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BrowseCreate"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Directory contents after create",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BrowseDir"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "500": {"description": "Create failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": ["system"],
+        "summary": "Prometheus metrics (only registered when metrics = true)",
+        "description": "Requires system:metrics:read. API key only: X-Api-Key or Authorization: Bearer. Session cookies and proxy/webauth are rejected.",
+        "security": [{"apiKey": []}, {"bearer": []}],
+        "responses": {
+          "200": {
+            "description": "Prometheus text",
+            "content": {"text/plain": {"schema": {"type": "string"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/queue": {
+      "get": {
+        "tags": ["queue"],
+        "summary": "In-flight extracts",
+        "description": "Requires system:queue:read",
+        "responses": {
+          "200": {
+            "description": "Live queue",
+            "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/QueueItem"}}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/queue/retry": {
+      "post": {
+        "tags": ["queue"],
+        "summary": "Retry an extractfailed item",
+        "description": "Requires system:queue:write. Id is a path in the JSON body.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IDRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Queued for retry",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StatusReply"}}}
+          },
+          "404": {"description": "Not in the live map", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "Not extractfailed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "504": {"$ref": "#/components/responses/GatewayTimeout"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/queue/forget": {
+      "post": {
+        "tags": ["queue"],
+        "summary": "Drop a terminal queue item from tracking",
+        "description": "Requires system:queue:write. Only extractfailed, extractednothing, imported, deleted, and deletefailed items can be forgotten.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IDRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Forgotten",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StatusReply"}}}
+          },
+          "404": {"description": "Not in the live map", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "Still in progress", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "504": {"$ref": "#/components/responses/GatewayTimeout"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/history": {
+      "get": {
+        "tags": ["history"],
+        "summary": "Completed and failed items (newest first)",
+        "description": "Requires system:history:read. Capped by keep_history.",
+        "responses": {
+          "200": {
+            "description": "History",
+            "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/HistoryRecord"}}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/history/delete": {
+      "post": {
+        "tags": ["history"],
+        "summary": "Delete one history row",
+        "description": "Requires system:history:write",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IDRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StatusReply"}}}
+          },
+          "404": {"description": "Unknown id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "500": {"$ref": "#/components/responses/PersistError"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/history/clear": {
+      "post": {
+        "tags": ["history"],
+        "summary": "Clear all history rows",
+        "description": "Requires system:history:write",
+        "responses": {
+          "200": {
+            "description": "Cleared",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StatusReply"}}}
+          },
+          "500": {"$ref": "#/components/responses/PersistError"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/config/env": {
+      "get": {
+        "tags": ["config"],
+        "summary": "Environment variables that overlaid config at startup",
+        "description": "Requires authentication. Keys are UN_* suffixes (DEBUG, SONARR_0_URL). Values are the env strings cnfg wrote into fields. Password, API key, webhook token, and webserver api key values are blank unless the caller has *.",
+        "responses": {
+          "200": {
+            "description": "Map of env suffix to value",
+            "content": {"application/json": {"schema": {
+              "type": "object",
+              "additionalProperties": {"type": "string"}
+            }}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/config/help": {
+      "get": {
+        "tags": ["config"],
+        "summary": "Field help from definitions.yml",
+        "description": "Requires authentication. English short/desc/env for each config field, keyed as config.<section>.<name>. The SPA uses this for ? tooltips; locale files may override.",
+        "responses": {
+          "200": {
+            "description": "Map of field id to help",
+            "content": {"application/json": {"schema": {
+              "type": "object",
+              "additionalProperties": {"$ref": "#/components/schemas/FieldHelp"}
+            }}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/config/{section}": {
+      "parameters": [
+        {
+          "name": "section",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": ["general", "webserver", "sonarr", "radarr", "lidarr", "readarr", "folders", "webhooks", "cmdhooks"]
+          }
+        }
+      ],
+      "get": {
+        "tags": ["config"],
+        "summary": "Read the on-disk config section",
+        "description": "Requires config:{section}:read. Returns file-shaped values (filepath: prefixes kept). Starr API keys are visible as stored. Unpackerr webserver apiKeys[].key is returned only to callers with *; PUT keeps a blank key of the same name. ui_password is !!cryptd!!, webauth, noauth, or filepath:; plaintext user:pass is blanked. PUT a new password as user:<kdf-hex> (same digest as login), not plaintext. Use GET /api/config/{section}/live for expanded running values. PUT this payload back to save.",
+        "responses": {
+          "200": {
+            "description": "On-disk section payload",
+            "content": {"application/json": {"schema": {"description": "Shape depends on section"}}}
+          },
+          "404": {"description": "Unknown section", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      },
+      "put": {
+        "tags": ["config"],
+        "summary": "Replace one config section and rewrite the TOML file",
+        "description": "Requires config:{section}:write. Body is the file-shaped GET payload (not /live). Unknown JSON fields, extra values, empty object sections, and nil list entries return 400. Arrays may be [] to clear. Validation, the TOML write, and the live apply run on the main loop; a persist failure is 500 and leaves runtime unchanged. An existing filepath: string in the same section is expanded for the running process and kept as filepath: on disk. A new or changed filepath: is 400; the API will not read a file that was not already referenced in that section. Replacing filepath: with a literal value is allowed. Empty apiKeys[].key keeps the existing key of the same name so a redacted GET can round-trip without *. webserver uiPassword on PUT is !!cryptd!!, webauth, noauth, an existing filepath:, or user:<64-char PBKDF2 hex> (the same kdf as login); plaintext user:pass is 400. Changing the live password hash or auth type while local password auth is on requires uiCurrentKdf (KDF of the current username+password). General interval changes reset the running tickers. Folder lists, webserver listen_addr, urlbase, TLS, metrics, pprof, log settings, debug, quiet, parallel, and file modes return restartRequired: true; the daemon then re-execs itself once nothing is queued, extracting, or awaiting delete. In-flight extracts are never cancelled.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"description": "Same shape as GET /api/config/{section}"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigWriteReply"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "500": {"$ref": "#/components/responses/PersistError"},
+          "504": {"$ref": "#/components/responses/GatewayTimeout"},
+          "404": {"description": "Unknown section", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/config/{section}/live": {
+      "parameters": [
+        {
+          "name": "section",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": ["general", "webserver", "sonarr", "radarr", "lidarr", "readarr", "folders", "webhooks", "cmdhooks"]
+          }
+        }
+      ],
+      "get": {
+        "tags": ["config"],
+        "summary": "Read the expanded running config section",
+        "description": "Requires config:{section}:read. Most filepath: values are expanded. Archive passwords are the post-env, pre-expansion slice, so filepath: from the file or UN_PASSWORDS is not replaced with secret-file contents. Unpackerr webserver apiKeys[].key is returned only to callers with *. ui_password is the stored hash or auth mode, not plaintext. Do not PUT this payload if you need to keep filepath: lines.",
+        "responses": {
+          "200": {
+            "description": "Live section payload",
+            "content": {"application/json": {"schema": {"description": "Shape depends on section"}}}
+          },
+          "404": {"description": "Unknown section", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "504": {"$ref": "#/components/responses/GatewayTimeout"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    }
+  }
+}

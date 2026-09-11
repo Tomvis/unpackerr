@@ -1,4 +1,6 @@
 /unpackerr
+/dist/
+__pycache__/
 
 # JetBrains IDEs: GoLand, IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio and WebStorm
 .idea/*
@@ -36,10 +38,10 @@ MANUAL.html
 README
 README.html
 /*_manual.html
-/homebrew-mugs
 .secret*files.tar
 github_deploy_key*
 .metadata.make
 /after-install-rendered.sh
 /before-remove-rendered.sh
 /gpg.signing.key
+/release_repo

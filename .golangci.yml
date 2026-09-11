@@ -4,6 +4,7 @@ linters:
   disable:
     # unused
     - exhaustruct
+    - exhaustruct_v5
     - exhaustive
     - dupl
     - nlreturn
@@ -21,9 +22,6 @@ linters:
     gomoddirectives:
       # The enhanced fork builds against the sibling xtractr checkout.
       replace-local: true
-      # Temporary until nwaples/rardecode#62 (RAR5 Linkname) merges.
-      replace-allow-list:
-        - github.com/nwaples/rardecode/v2
     depguard:
       rules:
         main:
@@ -41,7 +39,7 @@ linters:
             - github.com/radovskyb/watcher
             - github.com/prometheus/client_golang/
             - github.com/spf13/pflag
-            - github.com/julienschmidt/httprouter
+            - github.com/gorilla/securecookie
             - github.com/BurntSushi/toml
             - golift.io
             - golang.org/x

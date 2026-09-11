@@ -6,11 +6,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"time"
 
-	"github.com/Unpackerr/unpackerr/pkg/ui"
 	"github.com/dromara/carbon/v2"
 	homedir "github.com/mitchellh/go-homedir"
 	"golift.io/rotatorr"
@@ -25,72 +23,8 @@ const (
 	logsDirMode  = 0o755
 	starrLogPfx  = " =>    Server: "
 	starrLogLine = "%s, apikey:%v, timeout:%v, verify_ssl:%v, protos:%s, " +
-		"syncthing:%v, delete_orig:%v, delete_delay:%v, paths:%q"
+		"syncthing:%v, delete_orig:%v, delete_delay:%v, max_bytes:%s, paths:%q"
 )
-
-// ExtractStatus is our enum for an extract's status.
-type ExtractStatus uint8
-
-// Extract Statuses.
-const (
-	WAITING = ExtractStatus(iota)
-	QUEUED
-	EXTRACTING
-	EXTRACTFAILED
-	EXTRACTED
-	IMPORTED
-	DELETING
-	DELETEFAILED // unused
-	DELETED
-	EXTRACTEDNOTHING
-)
-
-// Desc makes ExtractStatus human readable.
-func (status ExtractStatus) Desc() string {
-	if status > EXTRACTEDNOTHING {
-		return "Unknown"
-	}
-
-	return []string{
-		// The order must not be faulty.
-		"Waiting, pre-Queue",
-		"Queued",
-		"Extracting",
-		"Extraction Failed",
-		"Extracted, Awaiting Import",
-		"Imported",
-		"Deleting",
-		"Delete Failed",
-		"Deleted",
-		"Nothing Extracted",
-	}[status]
-}
-
-// MarshalText turns a status into a word, for a json identifier.
-func (status ExtractStatus) MarshalText() ([]byte, error) {
-	return []byte(status.String()), nil
-}
-
-// String turns a status into a short string.
-func (status ExtractStatus) String() string {
-	if status > EXTRACTEDNOTHING {
-		return "unknown"
-	}
-
-	return []string{
-		// The order must not be faulty.
-		"waiting",
-		"queued",
-		"extracting",
-		"extractfailed",
-		"extracted",
-		"imported",
-		"deleting",
-		"deletefailed",
-		"deleted",
-		"extractednothing",
-	}[status]
-}
 
 // Debugf writes Debug log lines... to stdout and/or a file.
 func (l *Logger) Debugf(msg string, v ...any) {
@@ -124,10 +58,12 @@ func (u *Unpackerr) logCurrentQueue(now time.Time) {
 
 	u.Printf("[Unpackerr] Totals: %d retries, %d finished, %d|%d webhooks,"+
 		" %d|%d cmdhooks, stacks; event:%d, hook:%d, del:%d, up %s",
-		u.Retries, u.Finished, stats.HookOK, stats.HookFail, stats.CmdOK, stats.CmdFail,
-		len(u.folders.Events)+len(u.updates)+len(u.folders.Updates), len(u.hookChan), len(u.delChan),
+		stats.Retries, stats.Finished, stats.HookOK, stats.HookFail, stats.CmdOK, stats.CmdFail,
+		len(u.folders.Events)+len(u.updates)+len(u.folders.Updates), u.hookWorker.Len(), len(u.delChan),
 		carbon.CreateFromStdTime(version.Started).DiffAbsInString(carbon.CreateFromStdTime(now)))
-	u.updateTray(stats, uint(len(u.folders.Events)+len(u.updates)+len(u.folders.Updates)+len(u.delChan)+len(u.hookChan)))
+
+	u.updateTray(stats, uint(len(u.folders.Events)+len(u.updates)+
+		len(u.folders.Updates)+len(u.delChan)+u.hookWorker.Len()))
 }
 
 // setupLogging splits log write into a file and/or stdout.
@@ -140,12 +76,12 @@ func (u *Unpackerr) setupLogging() {
 	u.LogFile = getLogFilePath(u.LogFile, "unpackerr.log")
 	fileMode, _ := strconv.ParseUint(u.LogFileMode, bits8, base32)
 	rotate := &rotatorr.Config{
-		Filepath: u.LogFile,                     // log file name.
-		FileSize: int64(u.LogFileMb) * megabyte, // megabytes
+		Filepath: u.LogFile,
+		FileSize: logFileSize(u.LogFiles, u.LogFileMb),
 		Rotatorr: &timerotator.Layout{
 			FileCount:  u.LogFiles,
 			PostRotate: u.postLogRotate,
-		}, // number of files to keep.
+		},
 		DirMode:  logsDirMode,
 		FileMode: os.FileMode(fileMode),
 	}
@@ -194,6 +130,56 @@ func getLogFilePath(logFile, base string) string {
 	return logFile
 }
 
+func logFileSize(files, megabytes int) int64 {
+	if files <= 0 {
+		return rotatorr.NoMaxSize
+	}
+
+	return int64(megabytes) * megabyte
+}
+
+func (u *Unpackerr) waitForExit() {
+	for {
+		sig := <-u.sigChan
+		if isHangup(sig) {
+			u.reopenLogs()
+
+			continue
+		}
+
+		u.Printf("[unpackerr] Need help? %s\n=====> Exiting! Caught Signal: %v", helpLink, sig)
+
+		return
+	}
+}
+
+func (u *Unpackerr) reopenLogs() {
+	reopened := true
+
+	if u.rotatorr != nil {
+		if err := u.rotatorr.Reopen(); err != nil {
+			u.Errorf("Reopening log file: %v", err)
+
+			reopened = false
+		}
+	}
+
+	if u.httpLog != nil {
+		if err := u.httpLog.Reopen(); err != nil {
+			u.Errorf("Reopening HTTP log file: %v", err)
+
+			reopened = false
+		}
+	}
+
+	if !reopened {
+		return
+	}
+
+	// After Reopen so this lands in the live file, not the one logrotate just moved.
+	u.Printf("Caught SIGHUP: reopened log files")
+}
+
 func (u *Unpackerr) updateLogOutput(writer io.Writer, errors io.Writer) {
 	if u.Webserver != nil && u.Webserver.LogFile != "" {
 		u.setupHTTPLogging()
@@ -214,26 +200,29 @@ func (u *Unpackerr) updateLogOutput(writer io.Writer, errors io.Writer) {
 func (u *Unpackerr) setupHTTPLogging() {
 	u.Webserver.LogFile = getLogFilePath(u.Webserver.LogFile, "http.log")
 	rotate := &rotatorr.Config{
-		Filepath: u.Webserver.LogFile,                     // log file name.
-		FileSize: int64(u.Webserver.LogFileMb) * megabyte, // megabytes
+		Filepath: u.Webserver.LogFile,
+		FileSize: logFileSize(u.Webserver.LogFiles, u.Webserver.LogFileMb),
 		Rotatorr: &timerotator.Layout{FileCount: u.Webserver.LogFiles},
 		DirMode:  logsDirMode,
 	}
 
+	u.httpLog = rotatorr.NewMust(rotate)
+
 	switch { // only use MultiWriter if we have > 1 writer.
 	case !u.Quiet && u.Webserver.LogFile != "":
-		u.HTTP.SetOutput(io.MultiWriter(rotatorr.NewMust(rotate), os.Stdout))
+		u.HTTP.SetOutput(io.MultiWriter(u.httpLog, os.Stdout))
 	case !u.Quiet && u.Webserver.LogFile == "":
 		u.HTTP.SetOutput(os.Stdout)
 	case u.Quiet && u.Webserver.LogFile == "":
 		u.HTTP.SetOutput(io.Discard)
 	default: // u.Config.Quiet && u.Webserver.LogFile != ""
-		u.HTTP.SetOutput(rotatorr.NewMust(rotate))
+		u.HTTP.SetOutput(u.httpLog)
 	}
 }
 
 func (u *Unpackerr) postLogRotate(_, newFile string) {
 	if newFile != "" {
+		// Post runs on rotatorr's dispatch goroutine; a sync Printf deadlocks.
 		go u.Printf("Rotated log file to: %s", newFile)
 	}
 
@@ -252,35 +241,11 @@ func (u *Unpackerr) logStartupInfo(msg string, externalFiles map[string]string) 
 		u.Printf(" => Extra Config File: %s => %s", file, path)
 	}
 
-	u.logSonarr()
-	u.logRadarr()
-	u.logLidarr()
-	u.logReadarr()
-	u.logWhisparr()
-	u.logFolders()
-	u.Printf(" => Parallel: %d", u.Parallel)
-	u.Printf(" => Passwords: %d (rar/7z)", len(u.Passwords))
-	u.Printf(" => Interval / Progress: %s/%s", u.Interval.String(), u.Progress.String())
-	u.Printf(" => Start/Delete Delay: %s/%s", u.StartDelay.String(), u.DeleteDelay.String())
-	u.Printf(" => Retry Delay: %v, max: %d", u.RetryDelay, u.MaxRetries)
-	u.Printf(" => GUI / StdErr: %v / %v", ui.HasGUI(), u.ErrorStdErr)
-	u.Printf(" => Debug / Quiet: %v / %v", u.Config.Debug, u.Quiet)
-	u.Printf(" => Activity / Queues: %v / %s", u.Activity, u.LogQueues.String())
-
-	if runtime.GOOS != windows {
-		u.Printf(" => Directory & File Modes: %s & %s", u.DirMode, u.FileMode)
+	// Normalize before the dump so the logged URL base matches what startWebServer uses.
+	// The dump itself must not mutate config (live GET reuses the same printer).
+	if u.Webserver != nil && u.Webserver.Enabled() {
+		u.Webserver.normalizeURLBase()
 	}
 
-	if u.LogFile != "" {
-		msg := "no rotation"
-		if u.LogFiles > 0 {
-			msg = fmt.Sprintf("%d @ %dMb", u.LogFiles, u.LogFileMb)
-		}
-
-		u.Printf(" => Log File: %s (%s, mode: %s)", u.LogFile, msg, u.LogFileMode)
-	}
-
-	u.logWebhook()
-	u.logCmdhook()
-	u.logWebserver()
+	u.writeRunningConfig(u.Printf, dumpAuth{})
 }

@@ -2,7 +2,7 @@
 ##       Unpackerr Example Configuration File        ##
 #######################################################
 ##  The values are a mix of defaults and examples.   ##
-##  Environment Variables may override all values.   ##
+##  Env vars overlay the process, not this file.     ##
 ##  More configuration help: https://unpackerr.zip   ##
 ## Config Generator: https://notifiarr.com/unpackerr ##
 #######################################################
@@ -33,19 +33,26 @@ log_queues = "1m"
 ## The alternative is to use syslog to log the output of the application to a file.
 ## Default is no log file; this is unset.
 ## Except on macOS and Windows, the log file gets set to "~/.unpackerr/unpackerr.log"
-## log_files=0 turns off auto-rotation.
+## log_files=0 turns off auto-rotation so logrotate can own the file.
+## After logrotate renames the live file, send SIGHUP (`systemctl reload unpackerr`)
+## to close and reopen it. Use logrotate `create` plus postrotate HUP, not copytruncate.
 ## Default files is 10 and size(mb) is 10 Megabytes.
 #log_file = '/downloads/unpackerr.log'
 log_files = 10
 log_file_mb = 10
 log_file_mode = "0600"
 
+## How many completed or failed items to keep in unpackerr.history.jsonl
+## (next to the log file, or the config file if logs go to stdout).
+## The tray menu still shows only the last 10 names. `0` disables history.
+keep_history = 200
+
 ## How often to poll starr apps (sonarr, radarr, etc).
 ## Recommend 1m-5m. Uses Go Duration.
 interval = "2m"
 
 ## How often status is logged for in-progress extractions.
-## Recommend 2-60s. Uses Go Duration.
+## `0` uses the default `15s`. Uses Go Duration.
 progress = "15s"
 
 ## How long an item must be queued (download complete) before extraction will start.
@@ -58,8 +65,24 @@ start_delay = "1m"
 ## extraction will start again. Uses Go Duration.
 retry_delay = "5m"
 
-## How many times to retry a failed extraction. Pauses retry_delay between attempts.
-max_retries = 3
+## How many times to retry a failed extraction after the first try. Default is 2
+## (3 attempts total). `0` uses that default. Pauses retry_delay between attempts.
+max_retries = 2
+
+## Applies to Starr apps and to watched folders with `move_back` enabled
+## (the default folder config extracts into a sidecar tree and does not
+## classify leftovers there). When an extracted file cannot be moved into
+## place because the destination already exists, Unpackerr checks whether
+## that name was present before extraction. Names that arrived with the
+## download are kept; names that were not (leftovers from an interrupted
+## extraction) are handled by this setting. `rename` (default) moves the
+## leftover to a sibling named with a `.remnant` suffix and retries the
+## extract. `delete` removes it and retries. `off` leaves the leftover
+## in place and fails the extract without retrying. The item stays failed
+## until it leaves the Starr queue (folders are untracked). Bounded by
+## max_retries; if retries are exhausted the leftover fails the extract
+## instead of reporting success.
+remnant_action = "rename"
 
 ## How many files may be extracted in parallel. 1 works fine.
 ## Do not wrap the number in quotes. Raise this only if you have fast disks and CPU.
@@ -76,13 +99,29 @@ dir_mode = "0755"
 passwords = []
 
 [webserver]
-## The web server currently only supports metrics; set this to true if you wish to use it.
+## Expose Prometheus metrics at /metrics. The HTTP server starts whenever listen_addr is set;
+## this only controls the /metrics route. Scrapes must send an API key with
+## system:metrics:read via Authorization: Bearer or X-Api-Key.
  metrics = false
+## Expose Go pprof handlers at /debug/pprof/. Leave this false unless you
+## are debugging the running process.
+ pprof = false
 ## This may be set to a port or an ip:port to bind a specific IP. 0.0.0.0 binds ALL IPs.
+## Set this to an empty string to disable the HTTP server.
  listen_addr = "0.0.0.0:5656"
+## Local UI login. Use user:pass (hashed on startup), !!cryptd!!user:$2a$...
+## for a stored hash, webauth:X-Webauth-User for a reverse-proxy header, or
+## noauth. The HTTP API does not accept plaintext; send user:<PBKDF2 hex>
+## (same digest as login) and uiCurrentKdf when changing a live password.
+## filepath:/path reads that file for the live password and keeps filepath: in the
+## config. Empty generates a temporary password when the HTTP server is enabled.
+## Reset with --reset. Do not set an empty
+## UN_WEBSERVER_UI_PASSWORD; a present empty env value wipes a stored hash.
+ ui_password = ""
 ## Recommend setting a log file for HTTP requests. Otherwise, they go with other logs.
  log_file = ''
 ## This app automatically rotates logs. Set these to the size and number to keep.
+## log_files=0 disables auto-rotation; SIGHUP reopens the HTTP log too.
  log_files = 10
  log_file_mb = 10
 ## Set both of these to valid file paths to enable HTTPS/TLS.
@@ -95,6 +134,20 @@ passwords = []
 ## In the future it may control auth proxy trust. Must be a list of strings.
 ## example: upstreams = [ "127.0.0.1/32", "10.1.2.0/24" ]
  upstreams = []
+## Nested [[webserver.api_keys]] tables, not an inline array. Each key is 60–150 ASCII
+## characters. Names and key values must be unique. Built-in role `admin` grants every
+## permission. Custom roles are listed under [webserver.roles].
+## Env uses UN_WEBSERVER_API_KEYS_0_NAME, _KEY, and _ROLES_0.
+## Nested [webserver.roles.<name>] tables. Names are letters, digits, _ or -.
+## Built-in admin cannot be redefined. `*` is reserved for that built-in role.
+## Each custom role needs at least one known permission.
+## File browser is system:browse:read (list) and system:browse:write (create folder).
+## Env works but is picky: do not set UN_WEBSERVER_ROLES itself. Role names are
+## case-sensitive and may contain underscores. Index permissions from 0:
+## UN_WEBSERVER_ROLES_stats_PERMISSIONS_0=system:stats:read
+## UN_WEBSERVER_ROLES_read_only_PERMISSIONS_0=system:stats:read
+## [webserver.roles.stats]
+## permissions = ["system:stats:read"]
 
 ## Global Folder configuration that affects all watched folders.
 [folders]
@@ -109,7 +162,7 @@ passwords = []
 ##-IMPORTANT-#######-READ THIS!!!-################ Seriously, read this. ######
 ###############################################################################
 ## The following sections can be repeated if you have more than one Sonarr,  ##
-## Radarr, Lidarr, Readarr, Whisparr, Folder, Webhook, and/or Command Hook.  ##
+## Radarr, Lidarr, Readarr, Folder, Webhook, and/or Command Hook.            ##
 ## You MUST uncomment the [[header]], url and api_key at for any Starr app.  ##
 ## The [[sonarr]] and [[radarr]] headers come uncommented. Uncomment the url ##
 ## and api_key if they are in use. Comment them with a hash if they are not. ##
@@ -124,8 +177,22 @@ passwords = []
 ## Leaving the [[sonarr]] header uncommented (no leading hash #) without also
 ## uncommenting the api_key (remove the hash #) will produce a startup warning.
 [[sonarr]]
+## Empty uses the app name (Sonarr, Radarr, and so on). Set this for a
+## Sonarr-compatible app such as Sportarr so logs and Discord are not
+## tagged Sonarr. Add Whisparr as a Radarr instance with name = "Whisparr".
+## Hook exclude matches this name or the app dialect.
+## Names must be printable and cannot contain quotes, braces, or angle brackets.
+# name = ""
 # url = "http://127.0.0.1:8989"
 # api_key = "0123456789abcdef0123456789abcdef"
+## Username for HTTP basic authentication on the Starr app, if enabled.
+# http_user = ""
+## Password for HTTP basic authentication on the Starr app, if enabled.
+# http_pass = ""
+## Username for Starr native (forms) authentication, if enabled.
+# username = ""
+## Password for Starr native (forms) authentication, if enabled.
+# password = ""
 ## List of paths where content is downloaded for this app.
 ## Used as fallback if the path the Starr app reports does not exist or is not accessible.
 # paths = ['/downloads']
@@ -146,12 +213,33 @@ passwords = []
 # delete_orig = false
 ## If you use Syncthing, setting this to true will make unpackerr wait for syncs to finish.
 # syncthing = false
+## When true, Unpackerr verifies the Starr app HTTPS certificate.
+## The default is false for backward compatibility.
+# valid_ssl = false
+## Per-archive uncompressed-byte cap. Empty uses the app default:
+## Sonarr 20GB, Radarr 75GB, Lidarr 4GB, Readarr 1GB.
+## `0` or `0B` disables the cap for this instance.
+# max_bytes = ""
 
 ## Leaving the [[radarr]] header uncommented (no leading hash #) without also
 ## uncommenting the api_key (remove the hash #) will produce a startup warning.
 [[radarr]]
+## Empty uses the app name (Sonarr, Radarr, and so on). Set this for a
+## Sonarr-compatible app such as Sportarr so logs and Discord are not
+## tagged Sonarr. Add Whisparr as a Radarr instance with name = "Whisparr".
+## Hook exclude matches this name or the app dialect.
+## Names must be printable and cannot contain quotes, braces, or angle brackets.
+# name = ""
 # url = "http://127.0.0.1:7878"
 # api_key = "0123456789abcdef0123456789abcdef"
+## Username for HTTP basic authentication on the Starr app, if enabled.
+# http_user = ""
+## Password for HTTP basic authentication on the Starr app, if enabled.
+# http_pass = ""
+## Username for Starr native (forms) authentication, if enabled.
+# username = ""
+## Password for Starr native (forms) authentication, if enabled.
+# password = ""
 ## List of paths where content is downloaded for this app.
 ## Used as fallback if the path the Starr app reports does not exist or is not accessible.
 # paths = ['/downloads']
@@ -172,10 +260,31 @@ passwords = []
 # delete_orig = false
 ## If you use Syncthing, setting this to true will make unpackerr wait for syncs to finish.
 # syncthing = false
+## When true, Unpackerr verifies the Starr app HTTPS certificate.
+## The default is false for backward compatibility.
+# valid_ssl = false
+## Per-archive uncompressed-byte cap. Empty uses the app default:
+## Sonarr 20GB, Radarr 75GB, Lidarr 4GB, Readarr 1GB.
+## `0` or `0B` disables the cap for this instance.
+# max_bytes = ""
 
 #[[lidarr]]
+## Empty uses the app name (Sonarr, Radarr, and so on). Set this for a
+## Sonarr-compatible app such as Sportarr so logs and Discord are not
+## tagged Sonarr. Add Whisparr as a Radarr instance with name = "Whisparr".
+## Hook exclude matches this name or the app dialect.
+## Names must be printable and cannot contain quotes, braces, or angle brackets.
+# name = ""
 # url = "http://127.0.0.1:8686"
 # api_key = "0123456789abcdef0123456789abcdef"
+## Username for HTTP basic authentication on the Starr app, if enabled.
+# http_user = ""
+## Password for HTTP basic authentication on the Starr app, if enabled.
+# http_pass = ""
+## Username for Starr native (forms) authentication, if enabled.
+# username = ""
+## Password for Starr native (forms) authentication, if enabled.
+# password = ""
 ## List of paths where content is downloaded for this app.
 ## Used as fallback if the path the Starr app reports does not exist or is not accessible.
 # paths = ['/downloads']
@@ -196,13 +305,34 @@ passwords = []
 # delete_orig = false
 ## If you use Syncthing, setting this to true will make unpackerr wait for syncs to finish.
 # syncthing = false
+## When true, Unpackerr verifies the Starr app HTTPS certificate.
+## The default is false for backward compatibility.
+# valid_ssl = false
+## Per-archive uncompressed-byte cap. Empty uses the app default:
+## Sonarr 20GB, Radarr 75GB, Lidarr 4GB, Readarr 1GB.
+## `0` or `0B` disables the cap for this instance.
+# max_bytes = ""
 ## When enabled, FLAC files with embedded CUE sheets are split into
 ## individual track files.
 # split_flac = false
 
 #[[readarr]]
+## Empty uses the app name (Sonarr, Radarr, and so on). Set this for a
+## Sonarr-compatible app such as Sportarr so logs and Discord are not
+## tagged Sonarr. Add Whisparr as a Radarr instance with name = "Whisparr".
+## Hook exclude matches this name or the app dialect.
+## Names must be printable and cannot contain quotes, braces, or angle brackets.
+# name = ""
 # url = "http://127.0.0.1:8787"
 # api_key = "0123456789abcdef0123456789abcdef"
+## Username for HTTP basic authentication on the Starr app, if enabled.
+# http_user = ""
+## Password for HTTP basic authentication on the Starr app, if enabled.
+# http_pass = ""
+## Username for Starr native (forms) authentication, if enabled.
+# username = ""
+## Password for Starr native (forms) authentication, if enabled.
+# password = ""
 ## List of paths where content is downloaded for this app.
 ## Used as fallback if the path the Starr app reports does not exist or is not accessible.
 # paths = ['/downloads']
@@ -223,30 +353,13 @@ passwords = []
 # delete_orig = false
 ## If you use Syncthing, setting this to true will make unpackerr wait for syncs to finish.
 # syncthing = false
-
-#[[whisparr]]
-# url = "http://127.0.0.1:6969"
-# api_key = "0123456789abcdef0123456789abcdef"
-## List of paths where content is downloaded for this app.
-## Used as fallback if the path the Starr app reports does not exist or is not accessible.
-# paths = ['/downloads']
-## Protocols to process from the download queue. Starr apps historically
-## used "torrent" and "usenet" as the protocol strings, but newer versions
-## emit the full class names "TorrentDownloadProtocol" and
-## "UsenetDownloadProtocol" instead. List every string your app may return,
-## separated by commas. The default covers both the legacy and new torrent
-## strings. Add "usenet,UsenetDownloadProtocol" if you use a Usenet client.
-# protocols = "torrent,TorrentDownloadProtocol"
-## How long to wait for a reply from the backend.
-# timeout = "10s"
-## How long to wait after import before deleting the extracted items.
-# delete_delay = "5m"
-## If you use this app with NZB you may wish to delete archives after extraction.
-## General recommendation is: do not enable this for torrent use.
-## Setting this to true deletes the entire original download folder after import.
-# delete_orig = false
-## If you use Syncthing, setting this to true will make unpackerr wait for syncs to finish.
-# syncthing = false
+## When true, Unpackerr verifies the Starr app HTTPS certificate.
+## The default is false for backward compatibility.
+# valid_ssl = false
+## Per-archive uncompressed-byte cap. Empty uses the app default:
+## Sonarr 20GB, Radarr 75GB, Lidarr 4GB, Readarr 1GB.
+## `0` or `0B` disables the cap for this instance.
+# max_bytes = ""
 
 ##################################################################################
 ### ###  STOP HERE ### STOP HERE ### STOP HERE ### STOP HERE #### STOP HERE  ### #
@@ -268,10 +381,24 @@ passwords = []
 ## Path to extract files to. The default (leaving this blank) is the same as `path` (above).
 # extract_path = ''
 ## Delete extracted or original files this long after extraction.
-## The default is 0. Set to 0 to disable all deletes. Uncomment it to enable deletes. Uses Go Duration.
+## The default is 10m. Set to 0 to disable all deletes. Deletes also
+## require `delete_files` and/or `delete_original`. Uses Go Duration.
 # delete_after = "10m"
-## Unpackerr extracts archives inside archives. Set this to true to disable recursive extractions.
+## Nested archives are extracted by default. Disable recursion to extract only the outer archive.
 # disable_recursion = false
+## Per-archive uncompressed-byte cap. Empty is unlimited. `0` or `0B` is also unlimited.
+# max_bytes = ""
+## Cap on files, directories, and symlinks created during extract. `0` is unlimited.
+# max_files = 0
+## Cap on `bytes written / archive file size`. `0` is unlimited.
+# max_ratio = 0
+## Cap on archives extracted from this folder's output (one extras pass). `0` is unlimited.
+# max_nested = 0
+## Walk depth for the extras pass. `0` is unlimited.
+# extras_max_depth = 0
+## When true, the initial archive search may include symlink-named files.
+## The extras pass never follows archive-member zip links.
+# allow_symlinks = false
 ## Delete extracted files after successful extraction? delete_after must be greater than 0.
 # delete_files = false
 ## Delete original items after successful extraction? delete_after must be greater than 0.
@@ -306,7 +433,9 @@ passwords = []
 # nickname = "Unpackerr"
 ## Also passed into templates. Used in Slack templates for destination channel.
 # channel = ""
-## List of apps to exclude. None by default. This is an example:
+## Passed into webhook templates. Used by Discord, Telegram, and Slack.
+# token = ""
+## Dialect tokens skip every instance of that API. Any other value matches an instance name. None by default. This is an example:
 # exclude = ["readarr", "lidarr"]
 ## Override internal webhook template for discord.com or other hooks.
 # template_path = ''
@@ -338,9 +467,9 @@ passwords = []
 ## The default is [0] and this is an example:
 # events = [1, 4, 7]
 ## ===> Optional Command Hook Configuration <===
-## List of apps to exclude. None by default. This is an example:
+## Dialect tokens skip every instance of that API. Any other value matches an instance name. None by default. This is an example:
 # exclude = ["readarr", "lidarr"]
 ## You can adjust how long to wait for the command to run.
 # timeout = "10s"
 
-## => Content Auto Generated, 08 MAR 2026 18:55 UTC
+## => Content Auto Generated, 11 SEP 2026 06:50 UTC

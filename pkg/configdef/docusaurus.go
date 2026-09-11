@@ -1,0 +1,176 @@
+package configdef
+
+import (
+	"bytes"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+)
+
+/* This file creates a folder full of docusaurus markdown files for https://unpackerr.zip */
+
+func createDocusaurus(config *Config, output string) {
+	// Generate index file first.
+	if err := makeGenerated(config, output); err != nil {
+		log.Fatalln(err)
+	}
+	// Loop the 'Order' list.
+	for _, section := range config.Order {
+		// If Order contains a missing section, bail.
+		if config.Sections[section] == nil {
+			log.Fatalln(section + ": in order, but missing from sections. This is a bug in definitions.yml.")
+		}
+		// We only care about sections with parameters defined.
+		if len(config.Sections[section].Params) < 1 {
+			continue
+		}
+
+		if config.Defs[section] != nil {
+			// Repeat this section based on defined definitions.
+			data := config.Sections[section].makeDefinedDocs(config.Prefix, config.Defs[section], config.DefOrder[section])
+			if err := writeDocusaurus(output, string(section), data); err != nil {
+				log.Fatalln(err)
+			}
+		} else {
+			data := config.Sections[section].makeDocs(config.Prefix, section)
+			if err := writeDocusaurus(output, string(section), data); err != nil {
+				log.Fatalln(err)
+			}
+		}
+	}
+}
+
+func writeDocusaurus(dir, file, content string) error {
+	_ = os.Mkdir(dir, dirMode)
+	date := "---\n## => Content Auto Generated, " +
+		strings.ToUpper(time.Now().UTC().Round(time.Second).Format("02 Jan 2006 15:04 UTC")) + "\n---\n\n"
+	filePath := filepath.Join(dir, file+".md")
+	log.Printf("Writing: %s, size: %d", filePath, len(content))
+	//nolint:wrapcheck
+	return os.WriteFile(filePath, []byte(date+content), fileMode)
+}
+
+// makeGenerated writes a special index file that the website can import.
+// Adds all param sections except global into a docusaurus import format.
+// Also creates a footer file that can be imported and displayed.
+func makeGenerated(config *Config, output string) error {
+	var first, second bytes.Buffer
+
+	for _, section := range config.Order {
+		if len(config.Sections[section].Params) > 0 && section != "global" {
+			first.WriteString("import G")
+			first.WriteString(string(section))
+			first.WriteString(" from './")
+			first.WriteString(string(section))
+			first.WriteString(".md';\n")
+			second.WriteString("<G")
+			second.WriteString(string(section))
+			second.WriteString("/>\n")
+		}
+	}
+
+	err := writeDocusaurus(output, "index", first.String()+"\n"+second.String())
+	if err != nil {
+		return err
+	}
+
+	return writeDocusaurus(output, "footer", `<font color="gray" style={{'float': 'right', 'font-style': 'italic'}}>`+
+		"This page was [generated automatically](https://github.com/Unpackerr/unpackerr/tree/main/pkg/configdef), "+
+		strings.ToUpper(time.Now().UTC().Round(time.Second).Format("02 Jan 2006 15:04 UTC"))+"</font>\n")
+}
+
+func (h *Header) makeDocs(prefix string, section section) string {
+	conf := h.makeSection(section, true, true) // Generate this portion of the config file.
+	env := h.makeCompose(prefix, true)         // Generate this portion of the docker-compose example.
+
+	buf := bytes.Buffer{}
+	buf.WriteString("## ")
+	buf.WriteString(h.Title)
+	buf.WriteString("\n\n<details>\n  <summary>Examples. Prefix: <b>")
+	buf.WriteString(prefix)
+
+	if !h.NoHeader {
+		brace1, brace2 := "[", "]"
+		if h.Kind == list {
+			brace1, brace2 = "[[", "]]"
+		}
+
+		buf.WriteString(h.Prefix)
+		buf.WriteString("</b>, Header: <b> ")
+		buf.WriteString(brace1)
+		buf.WriteString(string(section))
+		buf.WriteString(brace2)
+	}
+
+	buf.WriteString("</b></summary>\n\n")
+	buf.WriteString("- Using the config file:\n\n```yaml\n")
+	buf.WriteString(strings.TrimSpace(conf))
+	buf.WriteString("\n```\n\n")
+	buf.WriteString("- Using environment variables:\n\n```js\n")
+	buf.WriteString(env)
+	buf.WriteString("```\n\n</details>\n\n")
+	buf.WriteString(h.Docs)
+	buf.WriteByte('\n')
+	buf.WriteString(h.makeDocsTable(prefix))
+	buf.WriteByte('\n')
+	buf.WriteString(h.Tail)
+
+	if h.Notes != "" { // Notes become a sub header.
+		buf.WriteString("### Notes for ")
+		buf.WriteString(h.Title)
+		buf.WriteString("\n\n")
+		buf.WriteString(h.Notes)
+	}
+
+	return buf.String()
+}
+
+const (
+	tableHeader = "|Config Name|Variable Name|Default / Note|\n|---|---|---|\n"
+	tableFormat = "|%s|`%s`|%v / %s|\n"
+)
+
+func (h *Header) makeDocsTable(prefix string) string {
+	buf := bytes.Buffer{}
+	buf.WriteString(tableHeader)
+
+	for _, param := range h.Params {
+		if param == nil {
+			continue
+		}
+
+		def := "No Default"
+
+		if rv := reflect.ValueOf(param.Default); rv.Kind() == reflect.Bool || !rv.IsZero() {
+			if t, _ := toml.Marshal(param.Default); len(t) > 0 {
+				def = "`" + string(t) + "`"
+			}
+		}
+
+		envVar := h.exampleEnv(prefix, param)
+		if envVar == "" {
+			fmt.Fprintf(&buf, "|%s|file only|%v / %s|\n", param.Name, def, param.Short)
+			continue
+		}
+
+		fmt.Fprintf(&buf, tableFormat, param.Name, envVar, def, param.Short)
+	}
+
+	return buf.String()
+}
+
+func (h *Header) makeDefinedDocs(prefix string, defs Defs, order []section) string {
+	var buf bytes.Buffer
+
+	for _, section := range order {
+		buf.WriteString(createDefinedSection(defs[section], h, section).makeDocs(prefix, section))
+	}
+
+	return buf.String()
+}

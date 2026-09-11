@@ -6,18 +6,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"golift.io/cnfg"
 	"golift.io/starr"
 )
 
-/* This file contains all the unique bits for each app. When adding a new app,
-   duplicate the lidarr.go file and rename all the things, then add the new app
-   to the various places below, in this file.
+/* Shared Starr poll/check/have lives in starrpoll.go. Lidarr SplitFlac is applied
+   via starrApp.tweakExtract so the other apps stay no-ops.
 */
 
-// DefaultQueuePageSize is how many items we request from Lidarr and Readarr.
-// Once we have better support for Sonarr/Radarr v3 this will apply to those as well.
+// DefaultQueuePageSize is how many queue items we request from each Starr app.
 // If you have more than this many items queued.. oof.
 // As the queue goes away, more things should get picked up.
 const DefaultQueuePageSize = 2000
@@ -29,6 +28,8 @@ const (
 	// always processed regardless of which Starr app version is in use.
 	defaultProtocol = "torrent,TorrentDownloadProtocol"
 	apiKeyMinLength = 32
+	// Quotes, braces, and similar break unescaped {{.App}} in webhook JSON templates.
+	starrNameMeta = "\"'`\\{}<>"
 )
 
 // These are the names used to identify each app.
@@ -38,55 +39,83 @@ const (
 
 // Application validation errors.
 var (
-	ErrInvalidURL = errors.New("provided application URL is invalid")
-	ErrInvalidKey = fmt.Errorf("provided application API Key is invalid, must be at least %d characters", apiKeyMinLength)
+	ErrInvalidURL  = errors.New("provided application URL is invalid")
+	ErrInvalidKey  = fmt.Errorf("provided application API Key is invalid, must be at least %d characters", apiKeyMinLength)
+	ErrInvalidName = errors.New("instance name must be printable and cannot contain quotes, braces, or angle brackets")
 )
+
+func checkStarrName(name string) error {
+	for _, r := range name {
+		if !unicode.IsPrint(r) || strings.ContainsRune(starrNameMeta, r) {
+			return ErrInvalidName
+		}
+	}
+
+	return nil
+}
+
+// skipInvalidApp reports whether a Starr instance should be dropped at
+// startup (missing/short URL or API key) rather than aborting the process.
+func skipInvalidApp(err error) bool {
+	return errors.Is(err, ErrInvalidURL) || errors.Is(err, ErrInvalidKey)
+}
 
 // Config defines the configuration data used to start the application.
 //
 //nolint:lll
 type Config struct {
-	Debug       bool             `json:"debug"              toml:"debug"         xml:"debug"         yaml:"debug"`
-	Quiet       bool             `json:"quiet"              toml:"quiet"         xml:"quiet"         yaml:"quiet"`
-	Activity    bool             `json:"activity"           toml:"activity"      xml:"activity"      yaml:"activity"`
-	Parallel    uint             `json:"parallel"           toml:"parallel"      xml:"parallel"      yaml:"parallel"`
-	ErrorStdErr bool             `json:"errorStderr"        toml:"error_stderr"  xml:"error_stderr"  yaml:"errorStderr"`
-	LogFile     string           `json:"logFile"            toml:"log_file"      xml:"log_file"      yaml:"logFile"`
-	LogFiles    int              `json:"logFiles"           toml:"log_files"     xml:"log_files"     yaml:"logFiles"`
-	LogFileMb   int              `json:"logFileMb"          toml:"log_file_mb"   xml:"log_file_mb"   yaml:"logFileMb"`
-	LogFileMode string           `json:"logFileMode"        toml:"log_file_mode" xml:"log_file_mode" yaml:"logFileMode"`
-	MaxRetries  uint             `json:"maxRetries"         toml:"max_retries"   xml:"max_retries"   yaml:"maxRetries"`
-	FileMode    string           `json:"fileMode"           toml:"file_mode"     xml:"file_mode"     yaml:"fileMode"`
-	DirMode     string           `json:"dirMode"            toml:"dir_mode"      xml:"dir_mode"      yaml:"dirMode"`
-	LogQueues   cnfg.Duration    `json:"logQueues"          toml:"log_queues"    xml:"log_queues"    yaml:"logQueues"`
-	Interval    cnfg.Duration    `json:"interval"           toml:"interval"      xml:"interval"      yaml:"interval"`
-	Timeout     cnfg.Duration    `json:"timeout"            toml:"timeout"       xml:"timeout"       yaml:"timeout"`
-	DeleteDelay cnfg.Duration    `json:"deleteDelay"        toml:"delete_delay"  xml:"delete_delay"  yaml:"deleteDelay"`
-	StartDelay  cnfg.Duration    `json:"startDelay"         toml:"start_delay"   xml:"start_delay"   yaml:"startDelay"`
-	RetryDelay  cnfg.Duration    `json:"retryDelay"         toml:"retry_delay"   xml:"retry_delay"   yaml:"retryDelay"`
-	Progress    cnfg.Duration    `json:"progress"           toml:"progress"      xml:"progress"      yaml:"progress"`
-	KeepHistory uint             `json:"keepHistory"        toml:"keep_history"  xml:"keep_history"  yaml:"keepHistory"` // undocumented.
-	Passwords   StringSlice      `json:"passwords"          toml:"passwords"     xml:"password"      yaml:"passwords"`
-	Webserver   *WebServer       `json:"webserver"          toml:"webserver"     xml:"webserver"     yaml:"webserver"`
-	Lidarr      []*LidarrConfig  `json:"lidarr,omitempty"   toml:"lidarr"        xml:"lidarr"        yaml:"lidarr,omitempty"`
-	Radarr      []*RadarrConfig  `json:"radarr,omitempty"   toml:"radarr"        xml:"radarr"        yaml:"radarr,omitempty"`
-	Whisparr    []*RadarrConfig  `json:"whisparr,omitempty" toml:"whisparr"      xml:"whisparr"      yaml:"whisparr,omitempty"`
-	Readarr     []*ReadarrConfig `json:"readarr,omitempty"  toml:"readarr"       xml:"readarr"       yaml:"readarr,omitempty"`
-	Sonarr      []*SonarrConfig  `json:"sonarr,omitempty"   toml:"sonarr"        xml:"sonarr"        yaml:"sonarr,omitempty"`
-	Folders     []*FolderConfig  `json:"folder,omitempty"   toml:"folder"        xml:"folder"        yaml:"folder,omitempty"`
-	Webhook     []*WebhookConfig `json:"webhook,omitempty"  toml:"webhook"       xml:"webhook"       yaml:"webhook,omitempty"`
-	Cmdhook     []*WebhookConfig `json:"cmdhook,omitempty"  toml:"cmdhook"       xml:"cmdhook"       yaml:"cmdhook,omitempty"`
-	Folder      FoldersConfig    `json:"folders"            toml:"folders"       xml:"folders"       yaml:"folders"` // undocumented.
-}
-
-type FoldersConfig struct {
-	Buffer   uint          `json:"buffer"   toml:"buffer"   xml:"buffer"   yaml:"buffer"`   // undocumented.
-	Interval cnfg.Duration `json:"interval" toml:"interval" xml:"interval" yaml:"interval"` // undocumented.
+	Debug         bool             `json:"debug"              toml:"debug"          xml:"debug"          yaml:"debug"`
+	Quiet         bool             `json:"quiet"              toml:"quiet"          xml:"quiet"          yaml:"quiet"`
+	Activity      bool             `json:"activity"           toml:"activity"       xml:"activity"       yaml:"activity"`
+	Parallel      uint             `json:"parallel"           toml:"parallel"       xml:"parallel"       yaml:"parallel"`
+	ErrorStdErr   bool             `json:"errorStderr"        toml:"error_stderr"   xml:"error_stderr"   yaml:"errorStderr"`
+	LogFile       string           `json:"logFile"            toml:"log_file"       xml:"log_file"       yaml:"logFile"`
+	LogFiles      int              `json:"logFiles"           toml:"log_files"      xml:"log_files"      yaml:"logFiles"`
+	LogFileMb     int              `json:"logFileMb"          toml:"log_file_mb"    xml:"log_file_mb"    yaml:"logFileMb"`
+	LogFileMode   string           `json:"logFileMode"        toml:"log_file_mode"  xml:"log_file_mode"  yaml:"logFileMode"`
+	MaxRetries    uint             `json:"maxRetries"         toml:"max_retries"    xml:"max_retries"    yaml:"maxRetries"`
+	RemnantAction string           `json:"remnantAction"      toml:"remnant_action" xml:"remnant_action" yaml:"remnantAction"`
+	FileMode      string           `json:"fileMode"           toml:"file_mode"      xml:"file_mode"      yaml:"fileMode"`
+	DirMode       string           `json:"dirMode"            toml:"dir_mode"       xml:"dir_mode"       yaml:"dirMode"`
+	LogQueues     cnfg.Duration    `json:"logQueues"          toml:"log_queues"     xml:"log_queues"     yaml:"logQueues"`
+	Interval      cnfg.Duration    `json:"interval"           toml:"interval"       xml:"interval"       yaml:"interval"`
+	Timeout       cnfg.Duration    `json:"timeout"            toml:"timeout"        xml:"timeout"        yaml:"timeout"`
+	DeleteDelay   cnfg.Duration    `json:"deleteDelay"        toml:"delete_delay"   xml:"delete_delay"   yaml:"deleteDelay"`
+	StartDelay    cnfg.Duration    `json:"startDelay"         toml:"start_delay"    xml:"start_delay"    yaml:"startDelay"`
+	RetryDelay    cnfg.Duration    `json:"retryDelay"         toml:"retry_delay"    xml:"retry_delay"    yaml:"retryDelay"`
+	Progress      cnfg.Duration    `json:"progress"           toml:"progress"       xml:"progress"       yaml:"progress"`
+	KeepHistory   uint             `json:"keepHistory"        toml:"keep_history"   xml:"keep_history"   yaml:"keepHistory"`
+	Passwords     StringSlice      `json:"passwords"          toml:"passwords"      xml:"password"       yaml:"passwords"`
+	Webserver     *WebServer       `json:"webserver"          toml:"webserver"      xml:"webserver"      yaml:"webserver"`
+	Lidarr        []*LidarrConfig  `json:"lidarr,omitempty"   toml:"lidarr"         xml:"lidarr"         yaml:"lidarr,omitempty"`
+	Radarr        []*RadarrConfig  `json:"radarr,omitempty"   toml:"radarr"         xml:"radarr"         yaml:"radarr,omitempty"`
+	Whisparr      []*RadarrConfig  `json:"whisparr,omitempty" toml:"whisparr"       xml:"whisparr"       yaml:"whisparr,omitempty"` // load only; folded into Radarr
+	Readarr       []*ReadarrConfig `json:"readarr,omitempty"  toml:"readarr"        xml:"readarr"        yaml:"readarr,omitempty"`
+	Sonarr        []*SonarrConfig  `json:"sonarr,omitempty"   toml:"sonarr"         xml:"sonarr"         yaml:"sonarr,omitempty"`
+	Folders       []*FolderConfig  `json:"folder,omitempty"   toml:"folder"         xml:"folder"         yaml:"folder,omitempty"`
+	Webhook       []*WebhookConfig `json:"webhook,omitempty"  toml:"webhook"        xml:"webhook"        yaml:"webhook,omitempty"`
+	Cmdhook       []*WebhookConfig `json:"cmdhook,omitempty"  toml:"cmdhook"        xml:"cmdhook"        yaml:"cmdhook,omitempty"`
+	Folder        FoldersConfig    `json:"folders"            toml:"folders"        xml:"folders"        yaml:"folders"` // undocumented.
 }
 
 func (u *Unpackerr) watchWorkThread() {
-	// 1 worker for each app, so they poll quickly.
-	for range len(u.Lidarr) + len(u.Radarr) + len(u.Readarr) + len(u.Sonarr) + len(u.Whisparr) {
+	u.ensureWorkThreads(u.starrAppCount())
+}
+
+func (u *Unpackerr) starrAppCount() int {
+	return len(u.Lidarr) + len(u.Radarr) + len(u.Readarr) + len(u.Sonarr)
+}
+
+// ensureWorkThreads grows the poll worker pool to one per Starr app so a PUT
+// that adds apps keeps polling them concurrently. Main loop only.
+func (u *Unpackerr) ensureWorkThreads(count int) {
+	if count < 1 {
+		count = 1
+	}
+
+	for u.workThreads < count {
+		u.workThreads++
+
 		go func() {
 			for funcs := range u.workChan {
 				for _, fn := range funcs {
@@ -99,53 +128,95 @@ func (u *Unpackerr) watchWorkThread() {
 
 // retrieveAppQueues polls all the starr app queues. At the same time.
 // Then calls the check methods to scan their queue contents for changes.
+// The app lists cannot change underneath this: a config PUT applies on this
+// same goroutine, and it is parked in wait.Wait() until every poll returns.
 func (u *Unpackerr) retrieveAppQueues(now time.Time) {
 	wait := sync.WaitGroup{}
-	wait.Add(len(u.Lidarr) + len(u.Radarr) + len(u.Readarr) + len(u.Sonarr) + len(u.Whisparr))
-	// Run each app's getQueue method in a go routine as a waitgroup.
-	for _, server := range u.Lidarr {
-		u.workChan <- []func(){func() { u.getLidarrQueue(server, now) }, wait.Done}
-	}
-
-	for _, server := range u.Radarr {
-		u.workChan <- []func(){func() { u.getRadarrQueue(server, now) }, wait.Done}
-	}
-
-	for _, server := range u.Readarr {
-		u.workChan <- []func(){func() { u.getReadarrQueue(server, now) }, wait.Done}
-	}
-
-	for _, server := range u.Sonarr {
-		u.workChan <- []func(){func() { u.getSonarrQueue(server, now) }, wait.Done}
-	}
-
-	for _, server := range u.Whisparr {
-		u.workChan <- []func(){func() { u.getWhisparrQueue(server, now) }, wait.Done}
-	}
+	wait.Add(u.starrAppCount())
+	enqueueStarrPoll(u, u.Lidarr, starr.Lidarr, now, &wait)
+	enqueueStarrPoll(u, u.Radarr, starr.Radarr, now, &wait)
+	enqueueStarrPoll(u, u.Readarr, starr.Readarr, now, &wait)
+	enqueueStarrPoll(u, u.Sonarr, starr.Sonarr, now, &wait)
 
 	wait.Wait()
 	// These are not thread safe because they call saveCompletedDownload.
-	u.checkLidarrQueue(now)
-	u.checkRadarrQueue(now)
-	u.checkReadarrQueue(now)
-	u.checkSonarrQueue(now)
-	u.checkWhisparrQueue(now)
+	checkStarrQueue(u, u.Lidarr, starr.Lidarr, now)
+	checkStarrQueue(u, u.Radarr, starr.Radarr, now)
+	checkStarrQueue(u, u.Readarr, starr.Readarr, now)
+	checkStarrQueue(u, u.Sonarr, starr.Sonarr, now)
+	u.sweepForgotten()
+}
+
+const whisparrConfigDocs = "https://unpackerr.zip/docs/install/configuration"
+
+// adoptWhisparrList moves deprecated [[whisparr]] instances onto a Radarr list.
+func adoptWhisparrList(dst *[]*RadarrConfig, src []*RadarrConfig) {
+	for _, conf := range src {
+		if conf == nil {
+			continue
+		}
+
+		if strings.TrimSpace(conf.Name) == "" {
+			conf.Name = string(starr.Whisparr)
+		}
+
+		*dst = append(*dst, conf)
+	}
+}
+
+// adoptWhisparr folds deprecated [[whisparr]] / UN_WHISPARR_* into Radarr so
+// existing configs keep working. The on-disk snapshot is adopted too so the
+// next config write emits [[radarr]] instead of dropping those instances.
+// Idempotent. Does not log: unmarshalConfig runs this before setupLogging.
+func (u *Unpackerr) adoptWhisparr() {
+	if len(u.Whisparr) == 0 && (u.fileConfig == nil || len(u.fileConfig.Whisparr) == 0) {
+		return
+	}
+
+	u.whisparrAdopted = true
+
+	if len(u.Whisparr) > 0 {
+		adoptWhisparrList(&u.Radarr, u.Whisparr)
+		u.Whisparr = nil
+	}
+
+	if u.fileConfig != nil && len(u.fileConfig.Whisparr) > 0 {
+		adoptWhisparrList(&u.fileConfig.Radarr, u.fileConfig.Whisparr)
+		u.fileConfig.Whisparr = nil
+	}
+}
+
+func (u *Unpackerr) warnAdoptedWhisparr() {
+	if !u.whisparrAdopted {
+		return
+	}
+
+	u.Errorf("Config Warning: [[whisparr]] is now [[radarr]]. Rename UN_WHISPARR_* to UN_RADARR_* and see %s",
+		whisparrConfigDocs)
 }
 
 // validateApps is broken-out into this file to make adding new apps easier.
 func (u *Unpackerr) validateApps() error {
+	u.adoptWhisparr()
+
 	for _, validate := range []func() error{
-		u.validateLidarr,
-		u.validateRadarr,
-		u.validateReadarr,
-		u.validateSonarr,
-		u.validateWhisparr,
+		u.validateRemnantAction,
+		func() error { return validateStarrList(u, &u.Lidarr, starr.Lidarr) },
+		func() error { return validateStarrList(u, &u.Radarr, starr.Radarr) },
+		func() error { return validateStarrList(u, &u.Readarr, starr.Readarr) },
+		func() error { return validateStarrList(u, &u.Sonarr, starr.Sonarr) },
 		u.validateFolders,
 	} {
 		if err := validate(); err != nil {
 			return err
 		}
 	}
+
+	seen := make(map[string]string)
+	warnDuplicateStarrNames(u, seen, starr.Lidarr, u.Lidarr)
+	warnDuplicateStarrNames(u, seen, starr.Radarr, u.Radarr)
+	warnDuplicateStarrNames(u, seen, starr.Readarr, u.Readarr)
+	warnDuplicateStarrNames(u, seen, starr.Sonarr, u.Sonarr)
 
 	for _, validate := range []func() error{
 		u.validateCmdhook,
@@ -162,15 +233,15 @@ func (u *Unpackerr) validateApps() error {
 func (u *Unpackerr) haveQitem(name string, app starr.App) bool {
 	switch app {
 	case starr.Lidarr:
-		return u.haveLidarrQitem(name)
+		return haveStarrQitem(u.Lidarr, name)
 	case starr.Radarr:
-		return u.haveRadarrQitem(name)
+		return haveStarrQitem(u.Radarr, name)
 	case starr.Readarr:
-		return u.haveReadarrQitem(name)
+		return haveStarrQitem(u.Readarr, name)
 	case starr.Sonarr:
-		return u.haveSonarrQitem(name)
+		return haveStarrQitem(u.Sonarr, name)
 	case starr.Whisparr:
-		return u.haveWhisparrQitem(name)
+		return haveStarrQitem(u.Radarr, name)
 	default:
 		return false
 	}

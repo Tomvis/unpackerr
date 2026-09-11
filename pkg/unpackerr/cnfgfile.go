@@ -2,15 +2,17 @@ package unpackerr
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/Unpackerr/unpackerr/examples"
+	"github.com/Unpackerr/unpackerr/pkg/configdef"
 	"github.com/Unpackerr/unpackerr/pkg/ui"
 	"github.com/dromara/carbon/v2"
 	homedir "github.com/mitchellh/go-homedir"
@@ -24,6 +26,12 @@ const (
 	msgConfigFailed = "Using env variables only. Could not create config file: "
 	msgConfigCreate = "Created new config file: "
 	msgConfigFound  = "Using Config File: "
+	filePrefix      = "filepath:"
+)
+
+var (
+	errNoConfigFile   = errors.New("no config file path")
+	errNoFileSnapshot = errors.New("no on-disk config snapshot")
 )
 
 func (u *Unpackerr) unmarshalConfig() (uint64, uint64, string, error) {
@@ -58,11 +66,36 @@ func (u *Unpackerr) unmarshalConfig() (uint64, uint64, string, error) {
 		msg = msgConfigCreate + u.ConfigFileWithAge()
 	}
 
-	if _, err := cnfg.UnmarshalENV(u.Config, u.EnvPrefix); err != nil {
+	// File snapshot first so UN_* overlays stay on the live Config and never get written back.
+	u.snapshotFileConfig()
+
+	res, err := cnfg.ParseENV(u.Config, u.EnvPrefix)
+	if err != nil {
 		return 0, 0, msg, fmt.Errorf("environment variables: %w", err)
 	}
 
+	u.envUsed = envSuffixes(res.Used, u.EnvPrefix)
+
+	// Fold before setupUIPassword / --reset can persist fileConfig without whisparr in DefOrder.
+	u.adoptWhisparr()
+
+	u.snapshotLivePasswords()
+
 	if err := u.setPasswords(); err != nil {
+		return 0, 0, msg, err
+	}
+
+	if err := u.setupUIPassword(); err != nil {
+		return 0, 0, msg, err
+	}
+
+	if err := u.Webserver.validateAuth(); err != nil {
+		return 0, 0, msg, err
+	}
+
+	u.Webserver.normalizeURLBase()
+
+	if err := u.Webserver.validateURLBase(); err != nil {
 		return 0, 0, msg, err
 	}
 
@@ -119,65 +152,78 @@ func configFileLocactions() (string, []string) {
 }
 
 // validateConfig makes sure config file values are ok. Returns file and dir modes.
-func (u *Unpackerr) validateConfig() (uint64, uint64) { //nolint:cyclop
-	if u.DeleteDelay.Duration > 0 && u.DeleteDelay.Duration < minimumDeleteDelay {
-		u.DeleteDelay.Duration = minimumDeleteDelay
+func (u *Unpackerr) validateConfig() (uint64, uint64) {
+	u.ensureTrayRing()
+
+	return clampConfig(u.Config)
+}
+
+// ensureTrayRing sizes the GUI history ring. This is tray-only; the API and web
+// UI read /api/history instead, so it goes away with the tray history menu.
+func (u *Unpackerr) ensureTrayRing() {
+	if u.KeepHistory != 0 && len(u.Items) == 0 {
+		u.Items = make([]string, min(u.KeepHistory, trayHistory))
+	}
+}
+
+// clampConfig applies minimums and fills defaults for omitted values. It takes a
+// *Config so a config PUT can clamp a staged copy and compare that against live,
+// instead of comparing raw input against already-clamped values.
+func clampConfig(cfg *Config) (uint64, uint64) { //nolint:cyclop
+	if cfg.DeleteDelay.Duration > 0 && cfg.DeleteDelay.Duration < minimumDeleteDelay {
+		cfg.DeleteDelay.Duration = minimumDeleteDelay
 	}
 
-	if _, err := strconv.ParseUint(u.LogFileMode, bits8, base32); err != nil || u.LogFileMode == "" {
-		u.LogFileMode = strconv.FormatUint(defaultLogFileMode, bits8)
+	if _, err := strconv.ParseUint(cfg.LogFileMode, bits8, base32); err != nil || cfg.LogFileMode == "" {
+		cfg.LogFileMode = strconv.FormatUint(defaultLogFileMode, bits8)
 	}
 
-	fileMode, err := strconv.ParseUint(u.FileMode, bits8, base32)
-	if err != nil || u.FileMode == "" {
+	fileMode, err := strconv.ParseUint(cfg.FileMode, bits8, base32)
+	if err != nil || cfg.FileMode == "" {
 		fileMode = defaultFileMode
-		u.FileMode = strconv.FormatUint(fileMode, bits8)
+		cfg.FileMode = strconv.FormatUint(fileMode, bits8)
 	}
 
-	dirMode, err := strconv.ParseUint(u.DirMode, bits8, base32)
-	if err != nil || u.DirMode == "" {
+	dirMode, err := strconv.ParseUint(cfg.DirMode, bits8, base32)
+	if err != nil || cfg.DirMode == "" {
 		dirMode = defaultDirMode
-		u.DirMode = strconv.FormatUint(dirMode, bits8)
+		cfg.DirMode = strconv.FormatUint(dirMode, bits8)
 	}
 
-	if u.Parallel == 0 {
-		u.Parallel++
+	if cfg.Parallel == 0 {
+		cfg.Parallel++
 	}
 
-	if u.Progress.Duration == 0 {
-		u.Progress.Duration = defaultProgressInterval
-	} else if u.Progress.Duration < minimumProgressInterval {
-		u.Progress.Duration = minimumProgressInterval
+	if cfg.Progress.Duration == 0 {
+		cfg.Progress.Duration = defaultProgressInterval
+	} else if cfg.Progress.Duration < minimumProgressInterval {
+		cfg.Progress.Duration = minimumProgressInterval
 	}
 
-	if u.Folder.Buffer == 0 {
-		u.Folder.Buffer = defaultFolderBuf
-	} else if u.Folder.Buffer < minimumFolderBuf {
-		u.Folder.Buffer = minimumFolderBuf
+	if cfg.Folder.Buffer == 0 {
+		cfg.Folder.Buffer = defaultFolderBuf
+	} else if cfg.Folder.Buffer < minimumFolderBuf {
+		cfg.Folder.Buffer = minimumFolderBuf
 	}
 
-	if u.Interval.Duration < minimumInterval {
-		u.Interval.Duration = minimumInterval
+	if cfg.Interval.Duration < minimumInterval {
+		cfg.Interval.Duration = minimumInterval
 	}
 
-	if u.StartDelay.Duration < minimumInterval {
-		u.StartDelay.Duration = minimumInterval
+	if cfg.StartDelay.Duration < minimumInterval {
+		cfg.StartDelay.Duration = minimumInterval
 	}
 
-	if u.LogQueues.Duration < minimumInterval {
-		u.LogQueues.Duration = minimumInterval
+	if cfg.LogQueues.Duration < minimumInterval {
+		cfg.LogQueues.Duration = minimumInterval
 	}
 
-	if u.ErrorStdErr && runtime.GOOS == windows {
-		u.ErrorStdErr = false // no stderr on windows
+	if cfg.ErrorStdErr && runtime.GOOS == windows {
+		cfg.ErrorStdErr = false // no stderr on windows
 	}
 
-	if ui.HasGUI() && u.LogFile == "" {
-		u.LogFile = filepath.Join("~", ".unpackerr", "unpackerr.log")
-	}
-
-	if u.KeepHistory != 0 {
-		u.Items = make([]string, u.KeepHistory)
+	if ui.HasGUI() && cfg.LogFile == "" {
+		cfg.LogFile = filepath.Join("~", ".unpackerr", "unpackerr.log")
 	}
 
 	return fileMode, dirMode
@@ -206,13 +252,12 @@ func (u *Unpackerr) createConfigFile(file string) (string, error) {
 		return "", fmt.Errorf("making config dir: %w", err)
 	}
 
-	fOpen, err := os.Create(file)
+	schema, err := configdef.Load()
 	if err != nil {
-		return "", fmt.Errorf("creating config file: %w", err)
+		return "", fmt.Errorf("definitions: %w", err)
 	}
-	defer fOpen.Close()
 
-	if _, err = fOpen.Write(examples.ConfigFile); err != nil {
+	if err := configdef.AtomicWrite(file, []byte(schema.ExampleTOML())); err != nil {
 		return "", fmt.Errorf("writing config file: %w", err)
 	}
 
@@ -223,14 +268,137 @@ func (u *Unpackerr) createConfigFile(file string) (string, error) {
 	return file, nil
 }
 
-// This function checks if rar passwords need to be read from a file path.
-// Only runs once at startup to load passwords into memory.
-func (u *Unpackerr) setPasswords() error {
-	const filePrefix = "filepath:"
+// writeConfigFile atomically rewrites the active config file from the on-disk snapshot.
+func (u *Unpackerr) writeConfigFile() error {
+	u.configMu.Lock()
+	defer u.configMu.Unlock()
 
+	return u.writeConfigFrom(u.fileConfig)
+}
+
+func (u *Unpackerr) writeConfigFrom(cfg *Config) error {
+	if strings.TrimSpace(u.ConfigFile) == "" {
+		return errNoConfigFile
+	}
+
+	schema, err := configdef.Load()
+	if err != nil {
+		return fmt.Errorf("%w: %w", errPersistConfig, err)
+	}
+
+	if cfg == nil {
+		return errNoFileSnapshot
+	}
+
+	body := schema.RenderTOML(cfg, configdef.RenderOpts{Mode: configdef.RenderLive})
+
+	if err := configdef.AtomicWrite(u.ConfigFile, []byte(body)); err != nil {
+		return fmt.Errorf("%w: %w", errPersistConfig, err)
+	}
+
+	return nil
+}
+
+// persistConfigFile writes the on-disk snapshot. Failure is recorded, not returned,
+// so a read-only config (puppet, container) still starts with in-memory values.
+func (u *Unpackerr) persistConfigFile() {
+	err := u.writeConfigFile()
+	switch {
+	case err == nil:
+		u.configWriteErr = nil
+	case errors.Is(err, errNoConfigFile):
+		return
+	default:
+		u.configWriteErr = err
+	}
+}
+
+func (u *Unpackerr) snapshotFileConfig() {
+	u.fileConfig = cloneConfig(u.Config)
+}
+
+// envSuffixes strips the parser prefix so the UI matches envVar="DEBUG" against UN_DEBUG.
+// cnfg joins prefix + "_" + tag, so a prefix that already ends in "_" (APP_)
+// produces APP__DEBUG; we strip that exact prefix and keep the rest as stored
+// (map keys like WEBSERVER_ROLES_stats_PERMISSIONS_0 stay mixed-case).
+func envSuffixes(used cnfg.Pairs, prefix string) map[string]string {
+	out := make(map[string]string, len(used))
+	pfx := prefix + cnfg.LevelSeparator
+
+	for key, val := range used {
+		name := key
+		if prefix != "" {
+			if cut, ok := strings.CutPrefix(key, pfx); ok {
+				name = cut
+			}
+		}
+
+		out[name] = val
+	}
+
+	return out
+}
+
+func envValueSecret(suffix string) bool {
+	name := strings.ToUpper(suffix)
+	if strings.Contains(name, "PASSWORD") || strings.Contains(name, "_PASS") ||
+		name == "API_KEY" || strings.HasSuffix(name, "_API_KEY") ||
+		strings.HasSuffix(name, "_TOKEN") {
+		return true
+	}
+
+	_, afterKeys, found := strings.Cut(name, "API_KEYS_")
+	if !found {
+		return false
+	}
+
+	_, after, ok := strings.Cut(afterKeys, "_")
+
+	return ok && after == "KEY"
+}
+
+func (u *Unpackerr) syncFileUIPassword() {
+	pass := u.uiPassword()
+
+	u.configMu.Lock()
+	defer u.configMu.Unlock()
+
+	if u.fileConfig == nil {
+		return
+	}
+
+	if u.fileConfig.Webserver == nil {
+		u.fileConfig.Webserver = &WebServer{}
+	}
+
+	u.fileConfig.Webserver.UIPassword = pass
+}
+
+func (u *Unpackerr) appendFileAPIKey(key APIKey) {
+	u.configMu.Lock()
+	defer u.configMu.Unlock()
+
+	if u.fileConfig == nil {
+		return
+	}
+
+	if u.fileConfig.Webserver == nil {
+		u.fileConfig.Webserver = &WebServer{}
+	}
+
+	cloned := cloneAPIKeys([]APIKey{key})
+	u.fileConfig.Webserver.APIKeys = append(u.fileConfig.Webserver.APIKeys, cloned...)
+}
+
+func (u *Unpackerr) snapshotLivePasswords() {
+	u.livePasswords = make(StringSlice, len(u.Passwords))
+	copy(u.livePasswords, u.Passwords)
+}
+
+func expandPasswords(passwords StringSlice) (StringSlice, error) {
 	newPasswords := []string{}
 
-	for _, pass := range u.Passwords {
+	for _, pass := range passwords {
 		if !strings.HasPrefix(pass, filePrefix) {
 			newPasswords = append(newPasswords, pass)
 			continue
@@ -238,7 +406,7 @@ func (u *Unpackerr) setPasswords() error {
 
 		fileContent, err := os.ReadFile(strings.TrimPrefix(pass, filePrefix))
 		if err != nil {
-			return fmt.Errorf("reading password file: %w", err)
+			return nil, fmt.Errorf("reading password file: %w", err)
 		}
 
 		filePasswords := strings.Split(string(fileContent), "\n")
@@ -250,7 +418,20 @@ func (u *Unpackerr) setPasswords() error {
 		newPasswords = append(newPasswords, filePasswords...)
 	}
 
-	u.Passwords = newPasswords
+	return newPasswords, nil
+}
+
+// This function checks if rar passwords need to be read from a file path.
+// Only runs once at startup to load passwords into memory.
+func (u *Unpackerr) setPasswords() error {
+	u.snapshotLivePasswords()
+
+	expanded, err := expandPasswords(u.Passwords)
+	if err != nil {
+		return err
+	}
+
+	u.Passwords = expanded
 
 	return nil
 }
@@ -273,23 +454,16 @@ func expandHomedir(filePath string) string {
 }
 
 func (u *Unpackerr) validateApp(conf *StarrConfig, app starr.App) error {
-	if conf.URL == "" {
-		u.Errorf("Missing %s URL in one of your configurations, skipped and ignored.", app)
-		return ErrInvalidURL // this error is not printed.
+	conf.Name = strings.TrimSpace(conf.Name)
+
+	if err := checkStarrName(conf.Name); err != nil {
+		return fmt.Errorf("%s name %q: %w", app, conf.Name, err)
 	}
 
-	if conf.APIKey == "" {
-		u.Errorf("Missing %s API Key in one of your configurations, skipped and ignored.", app)
-		return ErrInvalidURL // this error is not printed.
-	}
+	label := conf.Label(app)
 
-	if !strings.HasPrefix(conf.URL, "http://") && !strings.HasPrefix(conf.URL, "https://") {
-		return fmt.Errorf("%w: (%s) %s", ErrInvalidURL, app, conf.URL)
-	}
-
-	if len(conf.APIKey) < apiKeyMinLength {
-		return fmt.Errorf("%s (%s) %w, your key length: %d",
-			app, conf.URL, ErrInvalidKey, len(conf.APIKey))
+	if err := u.requireStarrAccess(conf, label); err != nil {
+		return err
 	}
 
 	if conf.Timeout.Duration == 0 {
@@ -300,7 +474,7 @@ func (u *Unpackerr) validateApp(conf *StarrConfig, app starr.App) error {
 		conf.DeleteDelay.Duration = u.DeleteDelay.Duration
 	}
 
-	if conf.Path != "" {
+	if conf.Path != "" && !slices.Contains(conf.Paths, conf.Path) {
 		conf.Paths = append(conf.Paths, conf.Path)
 	}
 
@@ -316,12 +490,73 @@ func (u *Unpackerr) validateApp(conf *StarrConfig, app starr.App) error {
 		conf.Protocols = defaultProtocol
 	}
 
+	if err := conf.applyMaxBytes(app); err != nil {
+		return fmt.Errorf("%s (%s) %w", label, conf.URL, err)
+	}
+
 	conf.Client = &http.Client{
 		Timeout: conf.Timeout.Duration,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: !conf.ValidSSL}, //nolint:gosec
 		},
 	}
+
+	return nil
+}
+
+func (u *Unpackerr) requireStarrAccess(conf *StarrConfig, label string) error {
+	if conf.URL == "" {
+		u.Errorf("Missing %s URL in one of your configurations, skipped and ignored.", label)
+		return ErrInvalidURL // this error is not printed.
+	}
+
+	if conf.APIKey == "" {
+		u.Errorf("Missing %s API Key in one of your configurations, skipped and ignored.", label)
+		return ErrInvalidKey // this error is not printed at startup; PUT returns it.
+	}
+
+	if !strings.HasPrefix(conf.URL, "http://") && !strings.HasPrefix(conf.URL, "https://") {
+		return fmt.Errorf("%w: (%s) %s", ErrInvalidURL, label, conf.URL)
+	}
+
+	if len(conf.APIKey) < apiKeyMinLength {
+		u.Errorf("%s (%s) API Key is too short (%d < %d), skipped and ignored.",
+			label, conf.URL, len(conf.APIKey), apiKeyMinLength)
+
+		return fmt.Errorf("%s (%s) %w, your key length: %d",
+			label, conf.URL, ErrInvalidKey, len(conf.APIKey))
+	}
+
+	return nil
+}
+
+func defaultAppMaxBytes(app starr.App) string {
+	switch app {
+	case starr.Sonarr:
+		return defaultSonarrMaxBytes
+	case starr.Radarr:
+		return defaultRadarrMaxBytes
+	case starr.Lidarr:
+		return defaultLidarrMaxBytes
+	case starr.Readarr:
+		return defaultReadarrMaxBytes
+	default:
+		return defaultSonarrMaxBytes
+	}
+}
+
+func (conf *StarrConfig) applyMaxBytes(app starr.App) error {
+	size := strings.TrimSpace(conf.MaxBytes)
+	if size == "" {
+		size = defaultAppMaxBytes(app)
+	}
+
+	n, err := parseExtractMaxBytes(size)
+	if err != nil {
+		return err
+	}
+
+	conf.maxBytes = n
 
 	return nil
 }

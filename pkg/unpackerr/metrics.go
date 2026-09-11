@@ -56,13 +56,13 @@ func (c *MetricsCollector) Collect(metrics chan<- prometheus.Metric) {
 	metrics <- newMetric(c.counter, prometheus.CounterValue, float64(stats.HookFail), "hook_fail")
 	metrics <- newMetric(c.counter, prometheus.CounterValue, float64(stats.CmdOK), "cmd_ok")
 	metrics <- newMetric(c.counter, prometheus.CounterValue, float64(stats.CmdFail), "cmd_fail")
-	metrics <- newMetric(c.counter, prometheus.CounterValue, float64(c.Retries), "retries")
-	metrics <- newMetric(c.counter, prometheus.CounterValue, float64(c.Finished), "finished")
+	metrics <- newMetric(c.counter, prometheus.CounterValue, float64(stats.Retries), "retries")
+	metrics <- newMetric(c.counter, prometheus.CounterValue, float64(stats.Finished), "finished")
 	metrics <- newMetric(c.buffer, prometheus.GaugeValue, float64(len(c.folders.Events)), "folder_events")
 	metrics <- newMetric(c.buffer, prometheus.GaugeValue, float64(len(c.updates)), "xtractr_updates")
 	metrics <- newMetric(c.buffer, prometheus.GaugeValue, float64(len(c.folders.Updates)), "folder_updates")
 	metrics <- newMetric(c.buffer, prometheus.GaugeValue, float64(len(c.delChan)), "deletes")
-	metrics <- newMetric(c.buffer, prometheus.GaugeValue, float64(len(c.hookChan)), "hooks")
+	metrics <- newMetric(c.buffer, prometheus.GaugeValue, float64(c.hookWorker.Len()), "hooks")
 }
 
 // updateMetrics observes metrics for each completed extraction. The url for a folder is the watch path.
@@ -78,9 +78,14 @@ func (u *Unpackerr) updateMetrics(resp *xtractr.Response, app starr.App, url str
 }
 
 // saveQueueMetrics observes metrics for each starr app queue request.
-func (u *Unpackerr) saveQueueMetrics(size int, start time.Time, app starr.App, url string, err error) {
+// app is the dialect for Prometheus labels; label is the human instance name for logs.
+func (u *Unpackerr) saveQueueMetrics(size int, start time.Time, app starr.App, url, label string, err error) {
 	if err != nil {
-		u.Errorf("%s (%s): %v", app, url, err)
+		if label == "" {
+			label = string(app)
+		}
+
+		u.Errorf("%s (%s): %v", label, url, err)
 	}
 
 	if u.metrics == nil {
@@ -148,17 +153,19 @@ func (u *Unpackerr) setupMetrics() {
 
 // Stats is filled and returned when a stats request is issued.
 type Stats struct {
-	Waiting    uint
-	Queued     uint
-	Extracting uint
-	Failed     uint
-	Extracted  uint
-	Imported   uint
-	Deleted    uint
-	HookOK     uint
-	HookFail   uint
-	CmdOK      uint
-	CmdFail    uint
+	Waiting    uint `json:"waiting"`
+	Queued     uint `json:"queued"`
+	Extracting uint `json:"extracting"`
+	Failed     uint `json:"failed"`
+	Extracted  uint `json:"extracted"`
+	Imported   uint `json:"imported"`
+	Deleted    uint `json:"deleted"`
+	HookOK     uint `json:"hookOK"`
+	HookFail   uint `json:"hookFail"`
+	CmdOK      uint `json:"cmdOK"`
+	CmdFail    uint `json:"cmdFail"`
+	Retries    uint `json:"retries"`
+	Finished   uint `json:"finished"`
 }
 
 // stats compiles and builds the statistics for the app.
@@ -166,6 +173,12 @@ func (u *Unpackerr) stats() *Stats {
 	stats := &Stats{}
 	stats.HookOK, stats.HookFail = u.WebhookCounts()
 	stats.CmdOK, stats.CmdFail = u.CmdhookCounts()
+
+	u.rLockHistory()
+	defer u.rUnlockHistory()
+
+	stats.Retries = u.Retries
+	stats.Finished = u.Finished
 
 	for name := range u.Map {
 		switch u.Map[name].Status {
