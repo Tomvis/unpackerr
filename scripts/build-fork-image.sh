@@ -20,10 +20,14 @@
 #   Both come from THIS Mac, which is git truth. The copies under
 #   ~/Projects on 10.0.0.120 are stale non-git snapshots and are NOT inputs.
 #
-#   The Dockerfile is DOCKER_HOST-side and standalone: ~/build/unpackerr-two-context.Dockerfile.
-#   It used to be generated from unpackerr/init/docker/Dockerfile, but upstream
-#   deleted that path in the 2026-09-11 merge (f852cdc0), so it is now hand-maintained.
-#   Edit it there; do not try to regenerate it.
+#   The Dockerfile is standalone and versioned in this repo:
+#   docker/unpackerr-two-context.Dockerfile (see docker/README.md). It ships to
+#   the Docker host inside the git archive. It used to be generated from
+#   unpackerr/init/docker/Dockerfile, but upstream deleted that path in the
+#   2026-09-11 merge (f852cdc0), so it is now hand-maintained. Edit it in this
+#   repo and commit before building; do not try to regenerate it. The old
+#   host-side copy, ~/build/unpackerr-two-context.Dockerfile on 10.0.0.120, is
+#   no longer read (set DOCKERFILE_SRC to use a different file).
 #
 #   ffmpeg is installed in the runtime stage and is a SILENT dependency: without
 #   it, splitting APE/WV/M4A/WAV CUE albums simply stops working. Nothing errors.
@@ -47,7 +51,7 @@ PUSH="${PUSH:-0}"
 
 DOCKER_HOST_SSH="${DOCKER_HOST_SSH:-tom@10.0.0.120}"
 CTX="${CTX:-\$HOME/build/unp-ctx}"
-DOCKERFILE_SRC="${DOCKERFILE_SRC:-\$HOME/build/unpackerr-two-context.Dockerfile}"
+DOCKERFILE_SRC="${DOCKERFILE_SRC:-$CTX/unpackerr/docker/unpackerr-two-context.Dockerfile}"
 IMAGE="${IMAGE:-tomvaisbort/unpackerr}"
 
 UNPACKERR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -74,7 +78,8 @@ BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "unpackerr $BRANCH@$UNP_COMMIT + xtractr @$XTR_COMMIT -> $IMAGE:$VERSION-$ITERATION"
 echo "docker host: $DOCKER_HOST_SSH"
 
-# Stage both trees. The Dockerfile lives outside CTX precisely because this wipes it.
+# Stage both trees. The Dockerfile arrives with the unpackerr archive, so it is
+# always the committed version at HEAD.
 ssh "$DOCKER_HOST_SSH" "rm -rf $CTX && mkdir -p $CTX/unpackerr $CTX/xtractr"
 git -C "$UNPACKERR_DIR" archive HEAD | ssh "$DOCKER_HOST_SSH" "tar -x -C $CTX/unpackerr"
 git -C "$XTRACTR_DIR"   archive HEAD | ssh "$DOCKER_HOST_SSH" "tar -x -C $CTX/xtractr"
