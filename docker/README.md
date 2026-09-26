@@ -30,6 +30,12 @@ The build script archives local `HEAD`, not the fork. Push `enhanced` in both re
 before building, so the commit recorded in the image exists outside the Mac. Until
 2026-09-26 both branches existed only on the Mac: the only remote was upstream.
 
+Upstream's `test-and-lint` workflow is disabled on Tomvis/unpackerr. It checks out
+one repo, so `../xtractr` never exists and every push fails. Re-enable it with
+`gh workflow enable test-and-lint -R Tomvis/unpackerr` if CI ever learns to check
+out both trees. xtractr's CI runs only on pull requests to `main`, so pushes to
+`enhanced` do not trigger it.
+
 Until 2026-09-26 this file lived only on the Docker host as
 `~/build/unpackerr-two-context.Dockerfile`. It was generated from
 `init/docker/Dockerfile` until upstream deleted that path in the 2026-09-11 merge
