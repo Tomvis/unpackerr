@@ -1,7 +1,7 @@
 # Multi-format CUE splitting for unpackerr (`enhanced` fork)
 
 **Date:** 2026-06-06
-**Repos/branch:** `golift/xtractr` @ `enhanced` (most code) + `Unpackerr/unpackerr` @ `enhanced` (wiring/image)
+**Repos/branch:** `xtractr` @ `enhanced` (most code) + `unpackerr` @ `enhanced` (wiring/image). These are local forks of `golift/xtractr` and `Unpackerr/unpackerr`; the `enhanced` branches were never upstream. Since 2026-09-26 they are published at `github.com/Tomvis/xtractr` and `github.com/Tomvis/unpackerr` (see `docker/README.md`).
 **Status:** Design approved, ready for implementation plan
 
 ## Context
