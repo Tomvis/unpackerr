@@ -13,6 +13,23 @@ Docker host (10.0.0.120, `~/build/unp-ctx`), builds with this file, and checks
 that ffmpeg is in the image (`PUSH=1` pushes). ffmpeg is a silent dependency:
 without it split_flac stops splitting APE/WV/M4A/WAV CUE albums and nothing errors.
 
+## Where the sources live
+
+Both trees are on GitHub, on branch `enhanced`:
+
+| Tree      | Fork (`origin`)                          | Upstream (`upstream`)                     |
+|-----------|------------------------------------------|-------------------------------------------|
+| unpackerr | https://github.com/Tomvis/unpackerr      | https://github.com/Unpackerr/unpackerr    |
+| xtractr   | https://github.com/Tomvis/xtractr        | https://github.com/golift/xtractr         |
+
+The working checkouts are `~/Projects/unpackerr` and `~/Projects/xtractr` on the Mac.
+They must be siblings, because the replace directive is `../xtractr`. To rebuild from
+a fresh machine, clone both forks side by side and check out `enhanced` in each.
+
+The build script archives local `HEAD`, not the fork. Push `enhanced` in both repos
+before building, so the commit recorded in the image exists outside the Mac. Until
+2026-09-26 both branches existed only on the Mac: the only remote was upstream.
+
 Until 2026-09-26 this file lived only on the Docker host as
 `~/build/unpackerr-two-context.Dockerfile`. It was generated from
 `init/docker/Dockerfile` until upstream deleted that path in the 2026-09-11 merge

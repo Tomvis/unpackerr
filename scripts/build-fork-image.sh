@@ -20,6 +20,13 @@
 #   Both come from THIS Mac, which is git truth. The copies under
 #   ~/Projects on 10.0.0.120 are stale non-git snapshots and are NOT inputs.
 #
+#   The Mac checkouts track the owner's GitHub forks, branch `enhanced` in each
+#   (origin = fork, upstream = original):
+#       unpackerr  https://github.com/Tomvis/unpackerr  (upstream Unpackerr/unpackerr)
+#       xtractr    https://github.com/Tomvis/xtractr    (upstream golift/xtractr)
+#   This script archives local HEAD, not the fork, so push both branches
+#   before building; otherwise the image's recorded commit exists only here.
+#
 #   The Dockerfile is standalone and versioned in this repo:
 #   docker/unpackerr-two-context.Dockerfile (see docker/README.md). It ships to
 #   the Docker host inside the git archive. It used to be generated from
