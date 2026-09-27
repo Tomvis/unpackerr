@@ -13,15 +13,17 @@ type ReadarrConfig struct {
 	*readarr.Readarr `json:"-" toml:"-" xml:"-" yaml:"-"`
 }
 
-func (r *ReadarrConfig) pollQueue() (int, int, error) {
-	queue, err := r.GetQueue(DefaultQueuePageSize, 1)
-	if err != nil {
-		return 0, 0, fmt.Errorf("getting queue: %w", err)
+func (r *ReadarrConfig) pollQueue() (func(), int, int, error) {
+	if r.Readarr == nil {
+		r.connect()
 	}
 
-	r.Queue = queue
+	queue, err := r.GetQueue(DefaultQueuePageSize, 1)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("getting queue: %w", err)
+	}
 
-	return queue.TotalRecords, len(queue.Records), nil
+	return func() { r.Queue = queue }, queue.TotalRecords, len(queue.Records), nil
 }
 
 func (r *ReadarrConfig) queueViews() []queueView {
@@ -33,12 +35,14 @@ func (r *ReadarrConfig) queueViews() []queueView {
 
 	for _, rec := range r.Queue.Records {
 		out = append(out, queueView{
-			Title:      rec.Title,
-			Status:     rec.Status,
-			Protocol:   rec.Protocol,
-			OutputPath: rec.OutputPath,
-			Size:       rec.Size,
-			Sizeleft:   rec.Sizeleft,
+			Title:         rec.Title,
+			Status:        rec.Status,
+			TrackedStatus: rec.TrackedDownloadStatus,
+			TrackedState:  rec.TrackedDownloadState,
+			Protocol:      rec.Protocol,
+			OutputPath:    rec.OutputPath,
+			Size:          rec.Size,
+			Sizeleft:      rec.Sizeleft,
 			IDs: map[string]any{
 				"title":      rec.Title,
 				"authorId":   rec.AuthorID,

@@ -30,11 +30,10 @@ build: generate
 	go build -trimpath $(BUILD_FLAGS) -o unpackerr -ldflags "-w -s $(VERSION_LDFLAGS) $(EXTRA_LDFLAGS)"
 
 dev:
-	USEGUI=false \
 	UN_WEBSERVER_LISTEN_ADDR="$(UN_WEBSERVER_LISTEN_ADDR)" \
 	UN_WEBSERVER_UI_PASSWORD="$(UN_WEBSERVER_UI_PASSWORD)" \
 	UN_DEBUG=true \
-	go run . $(ARGS)
+	go run -ldflags "-w -s $(VERSION_LDFLAGS) $(EXTRA_LDFLAGS)" . $(ARGS)
 
 docker:
 	docker build \

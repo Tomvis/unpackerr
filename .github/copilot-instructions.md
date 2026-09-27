@@ -12,6 +12,9 @@ in mind; the items below have been raised and rejected before.
 - Live `Config` fields are read and written only on the main loop. Do not ask for a
   mutex around `u.StartDelay`, `u.Passwords`, `u.Sonarr`, and similar. If a new reader
   runs on another goroutine, route it through `onMainLoop` instead.
+  Exception: `GET /api/stats` / Prometheus `Collect` read Starr/folder map headers
+  under `configMu` and the last poll snapshot under `History.mu`. Poll workers publish
+  `Queue` and `last*` after `GetQueue` returns. Do not hop that path onto `onMainLoop`.
 - `retrieveAppQueues` does not need to snapshot the app lists. A config PUT applies on
   the same goroutine, which is parked in `wait.Wait()` until every poll returns.
 - `syncFileUIPassword` is not a lock-order inversion. `uiPassword()` releases
@@ -28,6 +31,9 @@ in mind; the items below have been raised and rejected before.
 - The history JSONL is written by this process, capped at `keep_history`, and read
   with `bufio.Reader.ReadBytes`. It is not untrusted input. Do not request line
   caps, bounded readers, atomic rename, rollback copies, or `.bak` handling for it.
+  Starr and Folder rows newer than 72 hours are restored into `History.Map`
+  after `validateApps`. Folder items are attached to the watch tracker after
+  `PollFolders` (which replaces `u.folders`). Do not skip Folder rows.
 - A local admin POST does not need context-cancellation checks between enqueue and
   execution on the main loop.
 - `New()` allocates `Config`, `Webserver`, `History`, and `folders`. Nil checks on
@@ -35,14 +41,12 @@ in mind; the items below have been raised and rejected before.
 - The tray builds its menus in `readyTray` before `go u.Run()`, and a config PUT
   cannot apply until the loop drains `taskChan`, so those reads of live `Config`
   are ordered before any possible write. They are not a race and do not need a
-  lock. When the web UI replaces the tray history menu it reads `/api/history`,
-  which is already guarded by `histMu`.
+  lock.
 - `filepath:` values are kept as written in `fileConfig` and expanded on the live
-  copy only (`expandFilepaths`). PUT may keep an existing `filepath:` string in the
-  same section. A new or changed `filepath:` is 400; the API must not read a file
-  the operator did not already put in that section of the config. Webserver PUT
-  expands `filepath:` only on `ui_password`. Do not add `expandFilepaths` across
-  API keys or TLS paths as a drive-by.
+  copy only (`expandFilepaths`). PUT may add or change a `filepath:` string; a
+  missing secret file is 400. Webserver PUT expands `filepath:` only on
+  `ui_password`. Do not add `expandFilepaths` across API keys or TLS paths as a
+  drive-by.
 
 ## Tests
 

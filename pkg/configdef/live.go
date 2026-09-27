@@ -89,12 +89,12 @@ func (c *Config) renderLive(live any, persist persistSet) string {
 			sectionVal, _ = fieldByTOML(root, string(name))
 		}
 
-		if header.Kind == list {
+		if header.Kind == list || header.Kind == named {
 			buf.WriteString(header.renderListLive(name, sectionVal, persist))
 			continue
 		}
 
-		buf.WriteString(header.makeSectionLive(name, false, sectionVal, persist))
+		buf.WriteString(header.makeSectionLive(name, "", false, sectionVal, persist))
 	}
 
 	return buf.String()
@@ -119,6 +119,10 @@ func (c *Config) renderDefinedLive(name section, root reflect.Value, persist per
 
 func (h *Header) renderListLive(name section, live reflect.Value, persist persistSet) string {
 	live = derefValue(live)
+	if h.Kind == named {
+		return h.renderNamedLive(name, live, persist)
+	}
+
 	if !live.IsValid() || live.Kind() != reflect.Slice || live.Len() == 0 {
 		return h.makeSection(name, false, false)
 	}
@@ -126,13 +130,48 @@ func (h *Header) renderListLive(name section, live reflect.Value, persist persis
 	var buf bytes.Buffer
 
 	for idx := range live.Len() {
-		buf.WriteString(h.makeSectionLive(name, true, derefValue(live.Index(idx)), persist))
+		buf.WriteString(h.makeSectionLive(name, "", true, derefValue(live.Index(idx)), persist))
 	}
 
 	return buf.String()
 }
 
-func (h *Header) makeSectionLive(name section, showHeader bool, live reflect.Value, persist persistSet) string {
+func (h *Header) renderNamedLive(name section, live reflect.Value, persist persistSet) string {
+	if !live.IsValid() || live.Kind() != reflect.Map || live.Len() == 0 {
+		return h.makeSection(name, false, false)
+	}
+
+	keys := make([]string, 0, live.Len())
+
+	for _, keyVal := range live.MapKeys() {
+		if keyVal.Kind() == reflect.String {
+			keys = append(keys, keyVal.String())
+		}
+	}
+
+	slices.Sort(keys)
+
+	var buf bytes.Buffer
+
+	for _, key := range keys {
+		item := derefValue(live.MapIndex(reflect.ValueOf(key)))
+		if !item.IsValid() {
+			continue
+		}
+
+		buf.WriteString(h.makeSectionLive(name, key, true, item, persist))
+	}
+
+	if buf.Len() == 0 {
+		return h.makeSection(name, false, false)
+	}
+
+	return buf.String()
+}
+
+func (h *Header) makeSectionLive(
+	name section, key string, showHeader bool, live reflect.Value, persist persistSet,
+) string {
 	var buf bytes.Buffer
 
 	if h.Text != "" {
@@ -143,39 +182,30 @@ func (h *Header) makeSectionLive(name section, showHeader bool, live reflect.Val
 
 	if !h.NoHeader {
 		space = " "
-		left, right := "[", "]"
-
-		if h.Kind == list {
-			left, right = "[[", "]]"
-		}
-
 		comment := ""
-		if h.Kind == list && !showHeader {
+
+		if h.repeatable() && !showHeader {
 			comment = "#"
 		}
 
-		buf.WriteString(comment)
-		buf.WriteString(left)
-		buf.WriteString(string(name))
-		buf.WriteString(right)
-		buf.WriteByte('\n')
+		h.writeTOMLHeader(&buf, name, key, comment)
 	}
 
 	live = derefValue(live)
-	h.writeLiveParams(&buf, name, space, live, persist)
+	h.writeLiveParams(&buf, name, key, space, live, persist)
 
 	return buf.String()
 }
 
 func (h *Header) writeLiveParams(
-	buf *bytes.Buffer, name section, space string, live reflect.Value, persist persistSet,
+	buf *bytes.Buffer, name section, instanceKey, space string, live reflect.Value, persist persistSet,
 ) {
 	for _, param := range h.Params {
 		writeLiveParam(buf, name, space, live, persist, h.NoHeader, param)
 	}
 
 	buf.WriteString("\n")
-	buf.WriteString(h.renderNestedLive(name, live))
+	buf.WriteString(h.renderNestedLive(name, instanceKey, live))
 }
 
 func writeLiveParam(
@@ -222,7 +252,7 @@ func writeLiveParam(
 	fmt.Fprintf(buf, "%s%s%s = %s\n", comment, space, param.Name, text)
 }
 
-func (h *Header) renderNestedLive(section section, live reflect.Value) string {
+func (h *Header) renderNestedLive(section section, instanceKey string, live reflect.Value) string {
 	live = derefValue(live)
 	if !live.IsValid() {
 		return ""
@@ -240,13 +270,13 @@ func (h *Header) renderNestedLive(section section, live reflect.Value) string {
 			continue
 		}
 
-		buf.WriteString(renderNestedValue(section, param.Name, param.Kind, derefValue(field)))
+		buf.WriteString(renderNestedValue(section, instanceKey, param.Name, param.Kind, derefValue(field)))
 	}
 
 	return buf.String()
 }
 
-func renderNestedValue(section section, name, kind string, value reflect.Value) string {
+func renderNestedValue(section section, instanceKey, name, kind string, value reflect.Value) string {
 	if !value.IsValid() || isNilish(value) {
 		return ""
 	}
@@ -256,6 +286,8 @@ func renderNestedValue(section section, name, kind string, value reflect.Value) 
 		if value.Len() == 0 {
 			return ""
 		}
+	case reflect.Struct:
+		// kind: map of a struct is [section.name] + writeStructFields, same as a KV map.
 	default:
 		return ""
 	}
@@ -264,7 +296,7 @@ func renderNestedValue(section section, name, kind string, value reflect.Value) 
 	case tables:
 		return renderNestedTables(section, name, value)
 	case "map":
-		return renderNestedMap(section, name, value)
+		return renderNestedMap(section, instanceKey, name, value)
 	default:
 		return ""
 	}
@@ -286,9 +318,36 @@ func renderNestedTables(section section, name string, value reflect.Value) strin
 	return buf.String()
 }
 
-func renderNestedMap(section section, name string, value reflect.Value) string {
+func renderNestedMap(section section, instanceKey, name string, value reflect.Value) string {
+	if value.Kind() == reflect.Struct {
+		var fields bytes.Buffer
+
+		writeStructFields(&fields, value)
+
+		if fields.Len() == 0 {
+			return ""
+		}
+
+		var buf bytes.Buffer
+
+		fmt.Fprintf(&buf, "[%s]\n", nestedTableName(section, instanceKey, name))
+		buf.Write(fields.Bytes())
+		buf.WriteByte('\n')
+
+		return buf.String()
+	}
+
 	if value.Kind() != reflect.Map {
 		return ""
+	}
+
+	elem := value.Type().Elem()
+	for elem.Kind() == reflect.Pointer {
+		elem = elem.Elem()
+	}
+
+	if elem.Kind() != reflect.Struct {
+		return renderNestedKVMap(section, instanceKey, name, value)
 	}
 
 	keys := value.MapKeys()
@@ -307,6 +366,47 @@ func renderNestedMap(section section, name string, value reflect.Value) string {
 	return buf.String()
 }
 
+func renderNestedKVMap(section section, instanceKey, name string, value reflect.Value) string {
+	keys := sortedMapStringKeys(value)
+	if len(keys) == 0 {
+		return ""
+	}
+
+	var buf strings.Builder
+
+	fmt.Fprintf(&buf, "[%s]\n", nestedTableName(section, instanceKey, name))
+
+	for _, key := range keys {
+		fmt.Fprintf(&buf, " %s = %s\n", tomlKey(key), formatTOML("", value.MapIndex(reflect.ValueOf(key)).Interface()))
+	}
+
+	buf.WriteByte('\n')
+
+	return buf.String()
+}
+
+func nestedTableName(section section, instanceKey, param string) string {
+	if instanceKey == "" {
+		return string(section) + "." + param
+	}
+
+	return string(section) + "." + instanceKey + "." + param
+}
+
+func sortedMapStringKeys(value reflect.Value) []string {
+	keys := make([]string, 0, value.Len())
+
+	for _, key := range value.MapKeys() {
+		if key.Kind() == reflect.String {
+			keys = append(keys, key.String())
+		}
+	}
+
+	slices.Sort(keys)
+
+	return keys
+}
+
 func writeStructFields(buf *bytes.Buffer, value reflect.Value) {
 	value = derefValue(value)
 	if !value.IsValid() || value.Kind() != reflect.Struct {
@@ -321,12 +421,20 @@ func writeStructFields(buf *bytes.Buffer, value reflect.Value) {
 			continue
 		}
 
-		tag, _, _ := strings.Cut(field.Tag.Get("toml"), ",")
+		tag, opts, _ := strings.Cut(field.Tag.Get("toml"), ",")
 		if tag == "" || tag == "-" {
 			continue
 		}
 
-		fmt.Fprintf(buf, " %s = %s\n", tag, formatTOML(tag, value.Field(idx).Interface()))
+		fieldVal := value.Field(idx)
+		if strings.Contains(opts, "omitempty") {
+			empty := derefValue(fieldVal)
+			if empty.Kind() == reflect.String && empty.String() == "" {
+				continue
+			}
+		}
+
+		fmt.Fprintf(buf, " %s = %s\n", tag, formatTOML(tag, fieldVal.Interface()))
 	}
 }
 
@@ -395,8 +503,8 @@ func formatTOML(name string, val any) string {
 		return "''"
 	}
 
-	if value.Kind() == reflect.Map && value.Len() == 0 {
-		return "{}"
+	if value.Kind() == reflect.Map {
+		return formatTOMLMap(value)
 	}
 
 	if (value.Kind() == reflect.Slice || value.Kind() == reflect.Array) && value.Len() == 0 {
@@ -406,6 +514,34 @@ func formatTOML(name string, val any) string {
 	out := marshalTOML(value)
 
 	return strings.TrimSpace(string(preferPathQuotes(name, out)))
+}
+
+// formatTOMLMap writes an inline table. toml.Marshal of a map emits document
+// rows (`key = "val"`), which become `name = key = "val"` in an assignment.
+func formatTOMLMap(value reflect.Value) string {
+	if !value.IsValid() || value.Len() == 0 {
+		return "{}"
+	}
+
+	keys := sortedMapStringKeys(value)
+
+	var buf strings.Builder
+
+	buf.WriteString("{ ")
+
+	for idx, key := range keys {
+		if idx > 0 {
+			buf.WriteString(", ")
+		}
+
+		buf.WriteString(tomlKey(key))
+		buf.WriteString(" = ")
+		buf.WriteString(formatTOML("", value.MapIndex(reflect.ValueOf(key)).Interface()))
+	}
+
+	buf.WriteString(" }")
+
+	return buf.String()
 }
 
 func emptyCollectionTOML(value reflect.Value) string {

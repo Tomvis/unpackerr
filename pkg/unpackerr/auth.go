@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -105,7 +106,7 @@ func (u *Unpackerr) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(response http.ResponseWriter, request *http.Request) {
 		info, ok := u.authenticate(request)
 		if !ok {
-			writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			u.writeUnauthorized(response)
 
 			return
 		}
@@ -222,8 +223,10 @@ func (u *Unpackerr) authenticate(request *http.Request) (authInfo, bool) {
 		return info, true
 	}
 
+	// Proxy/noauth is per-request. A leftover password session must not
+	// become admin when the proxy username or role header is missing.
 	if user, ok := u.sessionUser(request); ok {
-		return u.sessionAuth(user), true
+		return u.sessionAuth(user)
 	}
 
 	return authInfo{}, false
@@ -250,44 +253,136 @@ func (u *Unpackerr) proxyAuth(request *http.Request) (authInfo, bool) {
 	u.uiPassMu.RLock()
 	pass := u.Webserver.UIPassword
 	allowed := u.Webserver.allow.Contains(request.RemoteAddr)
+	roleHeader := strings.TrimSpace(u.Webserver.UIRoleHeader)
+	roles := u.Webserver.Roles
+	adminKey := u.Webserver.adminAPIKey()
 	u.uiPassMu.RUnlock()
 
 	if !pass.Webauth() || !allowed {
 		return authInfo{}, false
 	}
 
-	user := defaultUIUser
+	user, haveUser := proxyUsername(pass, request)
+	if !haveUser {
+		return authInfo{}, false
+	}
 
-	if pass.Type() == AuthHeader {
-		if header := strings.TrimSpace(request.Header.Get(pass.Header())); header != "" {
-			user = header
-		} else {
+	perms, apiKey := AllPermissions(), adminKey
+
+	if !pass.Noauth() {
+		var haveRoles bool
+
+		perms, apiKey, haveRoles = proxyRolePerms(roleHeader, request, roles, adminKey)
+		if !haveRoles {
 			return authInfo{}, false
 		}
 	}
 
-	return u.sessionAuth(user), true
+	return authInfo{
+		Username:    user,
+		APIKey:      apiKey,
+		Auth:        pass.Type().String(),
+		Via:         pass.Type().String(),
+		GOOS:        runtime.GOOS,
+		Permissions: perms,
+	}, true
 }
 
-func (u *Unpackerr) sessionAuth(user string) authInfo {
+func proxyUsername(pass CryptPass, request *http.Request) (string, bool) {
+	if hdr := pass.requiredHeader(); hdr != "" {
+		user := strings.TrimSpace(request.Header.Get(hdr))
+
+		return user, user != ""
+	}
+
+	if pass.Type() == AuthHeader {
+		return "", false
+	}
+
+	if !pass.Noauth() {
+		return defaultUIUser, true
+	}
+
+	hdr := strings.TrimSpace(pass.Header())
+	if hdr == "" {
+		return defaultUIUser, true
+	}
+
+	if got := strings.TrimSpace(request.Header.Get(hdr)); got != "" {
+		return got, true
+	}
+
+	return defaultUIUser, true
+}
+
+// proxyRolePerms maps a proxy role header onto configured roles. An empty
+// configured name (Trust "Always admin") keeps every trusted proxy user as
+// admin. Once a header name is selected, a missing or empty value rejects
+// the request; it does not fall through to admin. Extra names that are not
+// Unpackerr roles (IdP groups) are ignored. Access is the union of matching
+// names; no match is 401.
+func proxyRolePerms(
+	headerName string, request *http.Request, roles map[string]Role, adminKey string,
+) ([]string, string, bool) {
+	headerName = strings.TrimSpace(headerName)
+	if headerName == "" {
+		return AllPermissions(), adminKey, true
+	}
+
+	matched := matchingProxyRoles(parseRoleHeader(request.Header.Get(headerName)), roles)
+	if len(matched) == 0 {
+		return nil, "", false
+	}
+
+	perms := (&WebServer{Roles: roles}).permissionsForRoles(matched)
+	if len(perms) == 0 {
+		return nil, "", false
+	}
+
+	key := ""
+	if slices.Contains(matched, RoleAdmin) {
+		key = adminKey
+	}
+
+	return perms, key, true
+}
+
+func matchingProxyRoles(names []string, roles map[string]Role) []string {
+	out := make([]string, 0, len(names))
+
+	for _, name := range names {
+		if name == RoleAdmin {
+			out = append(out, name)
+
+			continue
+		}
+
+		if _, exists := roles[name]; exists {
+			out = append(out, name)
+		}
+	}
+
+	return out
+}
+
+func (u *Unpackerr) sessionAuth(user string) (authInfo, bool) {
 	u.uiPassMu.RLock()
 	pass := u.Webserver.UIPassword
 	admin := u.Webserver.adminAPIKey()
 	u.uiPassMu.RUnlock()
 
-	info := authInfo{
+	if pass.Webauth() {
+		return authInfo{}, false
+	}
+
+	return authInfo{
 		Username:    user,
 		APIKey:      admin,
 		Auth:        pass.Type().String(),
 		Via:         "session",
 		GOOS:        runtime.GOOS,
 		Permissions: AllPermissions(),
-	}
-	if pass.Webauth() {
-		info.Via = pass.Type().String()
-	}
-
-	return info
+	}, true
 }
 
 func (w *WebServer) keyName(key string) string {
@@ -432,7 +527,8 @@ func (u *Unpackerr) handleLogin(response http.ResponseWriter, request *http.Requ
 		return false
 	}
 
-	writeJSON(response, http.StatusOK, u.withRequestAuth(u.sessionAuth(name), request))
+	info, _ := u.sessionAuth(name)
+	writeJSON(response, http.StatusOK, u.withRequestAuth(info, request))
 
 	return true
 }
@@ -570,6 +666,15 @@ func hostFromRemoteAddr(addr string) string {
 	return strings.Trim(addr[:idx], "[]")
 }
 
+func (u *Unpackerr) writeUnauthorized(response http.ResponseWriter) {
+	body := map[string]string{"error": "unauthorized"}
+	if pass := u.uiPassword(); pass.Webauth() {
+		body["auth"] = pass.Type().String()
+	}
+
+	writeJSON(response, http.StatusUnauthorized, body)
+}
+
 func writeJSON(response http.ResponseWriter, code int, msg any) {
 	body, err := json.Marshal(msg)
 	if err != nil {
@@ -581,4 +686,27 @@ func writeJSON(response http.ResponseWriter, code int, msg any) {
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(code)
 	_, _ = response.Write(append(body, '\n'))
+}
+
+// readJSON decodes one JSON object into dest. Unknown fields, trailing
+// values, and oversize bodies are 400.
+func readJSON(response http.ResponseWriter, request *http.Request, maxBytes int64, dest any) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, maxBytes))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(dest); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return false
+	}
+
+	switch err := decoder.Decode(&struct{}{}); {
+	case errors.Is(err, io.EOF):
+		return true
+	case err != nil:
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return false
+	default:
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": errExtraJSON.Error()})
+		return false
+	}
 }

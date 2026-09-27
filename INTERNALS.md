@@ -24,6 +24,8 @@ Two stacked feature series plus a follow-up mux swap. Closed duplicates (`#688`,
 | [#692](https://github.com/Unpackerr/unpackerr/pull/692) | Config PUT | Per-section PUT, `onMainLoop`, idle restart. Replaced the overbuilt `#688`. |
 | [#693](https://github.com/Unpackerr/unpackerr/pull/693) | OpenAPI | Embedded `pkg/unpackerr/openapi.json`. |
 | [#697](https://github.com/Unpackerr/unpackerr/pull/697) | Stdlib mux | Dropped `julienschmidt/httprouter`. Go `http.ServeMux` with `{section}` and `GET …/{$}` for the index. |
+| [#722](https://github.com/Unpackerr/unpackerr/pull/722) | PUT env overlay | Starr / folder / hook PUTs re-apply `UN_*` onto live so omitting an env-only slug cannot wipe it. File snapshot stays file-shaped. |
+| v1.0.0 (September 2026) | Named instance maps | Sonarr, Radarr, Lidarr, Readarr, folders, webhooks, and cmdhooks are `map[string]*Config` keyed by a slug. Dual-read old `[[section]]` arrays as `"0"`, `"1"`, …. PUT writes the request body as the file document. Live is `clone(fileConfig)` + `ParseENV` (cnfg overlays existing map entries). Env-only slugs still appear on live after `{}`. A client that PUTs live overlay values persists them. |
 
 The mux PR is routing only. Behavior below is from the API stacks unless noted.
 
@@ -41,7 +43,7 @@ Unpackerr is **one process**. One goroutine — `(*Unpackerr).Run()` in `pkg/unp
 
 HTTP handlers **must not** mutate those on the HTTP goroutine. They validate the body, then call `onMainLoop`. Queue retry/forget use the same handoff. Config GET of the **file** snapshot does **not** need the main loop (it is under `configMu`). Config GET of **live** general/starr/folders **does**, because live `Config` is main-loop memory.
 
-If a new reader of live `u.Sonarr` / `u.Passwords` / `u.StartDelay` runs off the main loop, do not add a mutex. Route it through `onMainLoop`.
+`GET /api/stats` (and Prometheus `Collect`) is the exception that reads live Starr/folder map headers off-loop. That path takes `configMu` for the instance headers (same as hook counts) and `History.mu` for `Queue` / `lastQueued` / `lastRetrieved` / `lastPolled` / `lastPollErr`. Poll workers publish those fields under the history write lock **after** `GetQueue` returns. Do not hop stats onto `onMainLoop`; that would stall scrapes behind Starr HTTP. Other new readers of live `u.Sonarr` / `u.Passwords` / `u.StartDelay` still go through `onMainLoop`.
 
 ---
 
@@ -83,8 +85,8 @@ Count **ours**, not `net/http` per-connection goroutines or `xtractr` extract wo
 | `runWebServer` | `listen_addr` set | Yes relative to pre-#678 (metrics-only) |
 | Starr poll workers (`workChan`) | `max(1, starrAppCount)`, **grows never shrinks** on Starr PUT | Grow-on-PUT is new |
 | `folders.watchFSNotify` | At least one watch folder | No |
-| folder poller `Watcher.Start` | Folder interval ≥ minimum | No |
-| tray: `watchKillerChannels` / `watchDebugChannels` | GUI builds | No |
+| folder poller `Watcher.Start` | Per-folder interval ≥ minimum | No |
+| tray: `watchKillerChannels` | GUI builds | No |
 
 **Idle restart does not add a goroutine.** `maybeRestart` runs on the existing cleaner tick (5s). Unix `syscall.Exec` replaces the process (same PID). Windows starts a copy and `os.Exit(0)`.
 
@@ -105,7 +107,7 @@ What the daemon *runs*: Starr HTTP clients, expanded secrets, hashed UI password
 **HTTP readers that are allowed off-loop:**
 
 - `uiPassMu` covers live webserver **auth** fields HTTP hits every request: `UIPassword`, `APIKeys`, `Roles`, `keyPerms`, `Upstreams`, `allow`. PUT applies those under that lock via `applyLiveWebserverAuth`.
-- Stats/queue/history have their own locks (`History.mu`, `histMu`, `configMu` for hook *counts*).
+- Stats/queue/history have their own locks (`History.mu`, `histMu`, `configMu` for hook/Starr/folder *counts* and the last Starr poll snapshot).
 
 Everything else live is main-loop only.
 
@@ -116,7 +118,7 @@ Clone of config **after TOML load, before `UN_*` overlay**. Keeps:
 - `filepath:/path` as the string `filepath:/path` (not file contents)
 - on-disk `ui_password` (`!!cryptd!!…`, `filepath:…`, or leftover plaintext)
 - API keys as stored in the file (not env-only keys)
-- Starr lists / folders / hooks as written
+- Starr / folder / hook maps as written (`[sonarr.uhd]`, not env-only slugs)
 
 **Owner:** `configMu`. Also written by the **tray** (Change Password, generated admin key). HTTP GET of the file snapshot clones under that lock. PUT stages a clone, atomically writes TOML, then swaps `fileConfig`.
 
@@ -135,7 +137,7 @@ Archive passwords **after env overlay, before `filepath:` expansion**. `GET /api
 1. Find or create a TOML file (`configdef` example on first run).
 2. `cnfgfile.Unmarshal` into `u.Config`.
 3. **`snapshotFileConfig()`** — this is the file-shaped copy. **Must happen before env.**
-4. `cnfg.UnmarshalENV(u.Config, u.EnvPrefix)` — default prefix `UN`. `UN_SONARR_0_API_KEY`, `UN_WEBSERVER_UI_PASSWORD`, `UN_WEBSERVER_ROLES_stats_PERMISSIONS_0`, etc.
+4. `cnfg.UnmarshalENV(u.Config, u.EnvPrefix)` — default prefix `UN`. `UN_SONARR_uhd_URL` (slug case matches the TOML key), `UN_SONARR_0_API_KEY` (array rows migrate to key `"0"`), `UN_WEBSERVER_UI_PASSWORD`, `UN_WEBSERVER_ROLES_stats_PERMISSIONS_0`, etc. Do not set a bare `UN_SONARR` / `UN_FOLDER` / `UN_WEBHOOK` / `UN_CMDHOOK`.
 5. `snapshotLivePasswords()` — copy `Passwords` (post-env, still `filepath:`).
 6. Password / UI password / API key setup (hash, generate, `--reset`).
 7. `validateAuth`, normalize + **validate URLBase** (`{` / `}` forbidden; ServeMux wildcards).
@@ -155,15 +157,15 @@ Any string field `cnfgfile` walks can be `filepath:/abs/or/~/path`. At startup a
 
 **Disk and `fileConfig` keep the prefix.** GET file returns that string, TOML writes that string, live client uses the file contents. That was a real bug in the first PUT stack: round-trip kept `filepath:` on disk but published the literal to the Starr client.
 
-**PUT cannot introduce a new `filepath:`.** Every `filepath:` string in the body must already appear in the same file-config section. Changing `filepath:/a` to `filepath:/b` is 400. Replacing `filepath:` with a literal (or omitting it) is allowed. The check runs **before** `expandFilepaths` / `expandPasswords` / `expandCryptPassFile` so a rejected PUT does not read the target file. Operators who need a new secret file edit the TOML (or env), not the API.
+**PUT may add or change a `filepath:`.** The live copy is expanded (`expandFilepaths` / `expandPasswords` / `expandCryptPassFile`). Disk and `fileConfig` keep the prefix. Replacing `filepath:` with a literal (or omitting it) is allowed. A missing or empty secret file is 400. Starr `/test` and hook `/test` expand `filepath:` on the submitted fields the same way.
 
 Archive passwords: expansion is `expandPasswords` (newline split). Other fields: `expandFilepaths` (`cnfgfile.Parse`).
 
-Empty / missing secret file is an error on PUT (400) when the `filepath:` was already allowed. Startup already failed that way for live parse.
+Empty / missing secret file is an error on PUT (400). Startup already failed that way for live parse.
 
 ### Env (`UN_*`)
 
-Env overlays **live only**. They are not merged into `fileConfig`. A later PUT that rewrites the whole Starr list from a **file GET** will not include an env-only extra server — that is intentional. Env-only extra keys/roles exist at runtime until restart unless you add them in the PUT body.
+Env overlays **live only**. They are not merged into `fileConfig`. Starr / folder / hook / general PUTs write the request body as the file snapshot, then overlay live with `ParseENV` (cnfg now overlays existing map entries instead of replacing them). Env-only slugs keep polling. They land in `fileConfig` only if the PUT body included them. PUT `{}` (or a legacy `[]`) clears file instances; live still has `UN_SONARR_uhd_*` / `UN_READARR_0_*`. Env-only extra keys/roles exist at runtime until restart unless you add them in the PUT body. General scalars (`UN_INTERVAL`, `UN_PASSWORDS`, …) follow the same overlay: a save that omits them keeps the env value on live. The official UI must GET the file section (not `/live`) so it does not persist overlay values.
 
 `UN_WEBSERVER_UI_PASSWORD`:
 
@@ -192,7 +194,7 @@ Same read perm. Running shape:
 - UI password hashed / webauth as used for login.
 - Webserver key redaction same as file GET (`*` to see secrets).
 
-Live GET of general/starr/folders/hooks runs `onMainLoop` so it does not race `Run()`.
+Live GET of Starr / folders / hooks includes env-created slugs and **redacts instance secrets** (`apiKey`, HTTP/native passwords, webhook token) even for `*`. File GET of those sections still shows file-stored Starr API keys. Live GET of general/starr/folders/hooks runs `onMainLoop` so it does not race `Run()`.
 
 ### PUT `/api/config/{section}`
 
@@ -200,28 +202,28 @@ Permission: `config:{section}:write`.
 
 Body **replaces** the section (not patch). Workflow the UI is built for: GET file → edit → PUT.
 
-Handler on HTTP goroutine: read ≤1 MiB, reject trailing JSON, reject `null` / empty object `{}` for object sections, reject `[null]` in lists. `DisallowUnknownFields`. Webserver PUT that is only `uiCurrentKdf` is the same empty-section 400 (`uiCurrentKdf` is a sidecar, not a config field).
+Handler on HTTP goroutine: read ≤1 MiB, reject trailing JSON, reject `null`. Empty object `{}` is 400 for general/webserver/folders wrappers; Starr / webhook / cmdhook maps accept `{}` (clear file instances). Legacy arrays still load as keys `"0"`, `"1"`, …. `DisallowUnknownFields`. Webserver PUT that is only `uiCurrentKdf` is the same empty-section 400 (`uiCurrentKdf` is a sidecar, not a config field).
 
 Then `onMainLoop` → `replaceConfigSection` → `commitConfig`:
 
 1. Clone `fileConfig`, mutate the **unexpanded** section onto the clone.
 2. Atomic write TOML (`configdef.AtomicWrite`). Failure → **500**, live unchanged (`errPersistConfig`).
 3. Swap `fileConfig` to the clone.
-4. `applyLive()`: expand, validate, swap live lists / general fields / webserver auth.
+4. `applyLive()`: expand, validate, swap live maps / general fields / webserver auth.
 
 Env-only (no config path): skip write, still apply live.
 
 **Empty `apiKeys[].key`:** treated as “keep existing secret of this **name**”. File fill from **file snapshot only** (so an env-overlay key is not persisted). Live fill from live then file. That is how a redacted GET round-trips without `*`.
 
-**Omitted / blank `ui_password` on PUT:** keep live password. An already-stored `filepath:` on PUT: expand for live, store the `filepath:` string on disk. A new `filepath:` is 400.
+**Omitted / blank `ui_password` on PUT:** keep live password. A `filepath:` on PUT: expand for live, store the `filepath:` string on disk.
 
 **New `ui_password` on PUT:** `!!cryptd!!…`, `webauth`, `noauth`, or `user:<64-char hex>` where the hex is the same PBKDF2 digest as login (`CryptPass.Set`, then bcrypt; mixed-case hex is stored lowercase). Plaintext `user:pass` is **400**. While live auth is local password, changing the hash or switching to header/noauth requires `uiCurrentKdf` (login `Valid()` on the current username). Header/noauth live mode does not. `uiCurrentKdf` is a PUT-only JSON field and is never written to TOML. A body that contains only `uiCurrentKdf` is **400** (empty section), so it cannot wipe `listen_addr` / keys / roles. Omitting `uiPassword` or sending the on-disk value unchanged keeps the live overlay, so `UN_WEBSERVER_UI_PASSWORD` is not replaced by the file hash.
 
-**Starr PUT:** invalid URL/key is **400** (startup *skips* bad apps; PUT does not). `path` merges into `paths` without dupes. Last poll `Queue` carries over when `url` + expanded `apiKey` match. Work thread pool **grows** to `starrAppCount`.
+**Starr PUT:** JSON object keyed by slug (letters, digits, `_`, `-`; same charset as roles). `name` is display only. Invalid URL/key on a **PUT-body** instance is **400** after `ParseENV` fills env secrets (so a Save that omits `apiKey` because `UN_*_API_KEY` is set still succeeds). Env-only overlay slugs that startup would skip (URL without key, or the reverse) are dropped from live, not 400 — they cannot block saving other instances. File commit is the PUT body. Live map is that body plus `ParseENV`, so a *complete* env-only extra instance survives `{}`. `path` merges into `paths` without dupes. Last poll `Queue` carries over when `url` + expanded `apiKey` match (`starrIdentity`). Work thread pool **grows** to `starrAppCount`. Changed in v1.0.0 (September 2026).
 
-**Folders PUT:** always `restartRequired: true`. Watcher is built once; rebuilding in-process was rejected (leak / dual poller).
+**Folders PUT:** wrapper `{ buffer, folder }`; inner `folder` is a slug map. Per-folder `interval` (default `0s` / off) starts one radovskyb poller for that path. Always `restartRequired: true`. Watcher is built once; rebuilding in-process was rejected (leak / dual poller).
 
-**Webhooks / cmdhooks PUT:** validate (including HTTP client) then publish. First-ever hook starts the hook worker.
+**Webhooks / cmdhooks PUT:** slug maps, same file-body / live overlay as Starr. Env-only overlay slugs that fail validation are dropped from live, not 400. PUT-body hooks still validate (including HTTP client) then publish. First-ever hook starts the hook worker.
 
 **General PUT:** applies interval / delays / remnant action / keep_history / passwords in place and **`resetTickers()`**. Interval is **not** `restartRequired`. Logger construction, `parallel` (xtractr), `file_mode` / `dir_mode`, `timeout` / `delete_delay` (copied into apps at validate time) **are** restart.
 
@@ -234,6 +236,16 @@ Reply:
 ```
 
 `pendingRestart` is sticky OR: one folders PUT then a general PUT that does not need restart still restarts when idle.
+
+### POST `/api/config/{section}/test`
+
+Permission: `config:{section}:write` (same as PUT). Does not persist.
+
+**Starr** (`sonarr` / `radarr` / `lidarr` / `readarr`): POST the current form `url`, `apiKey`, `valid_ssl`, `timeout`, and `slug`. Blank URL/API key are filled from the **live** instance matching `slug` (env-only / redacted GET). A new Starr client is built; live `Queue` is not mutated. Reply is `{queued, retrieved, torrents, nzbs, other?, elapsed}` (`elapsed` is a Go duration, rounded to 1ms). Bad URL/key is **400**. Remote GetQueue errors are **424** `{error, elapsed}`.
+
+**Hooks** (`webhooks` / `cmdhooks`): overlay posted fields onto a clone of the live hook (or a new hook). Non-empty strings replace live values; omitted strings keep them. `shell` and `ignoreSsl` override when present (including `false`); omitted keep live. `event` defaults to `extracted`; `app` defaults to Sonarr (`sonarr` / `radarr` / `lidarr` / `readarr` / `folder` or a named instance). `hooks.Fire` runs on the HTTP goroutine (not the hook worker). Reply is `{status, reply, elapsed}` with `reply` clipped to 2048 runes. Missing URL/command is **400**. Delivery failure is **424** `{error, elapsed}`.
+
+**general**, **webserver**, **folders**, **hooks**: **400** `this section cannot be tested`.
 
 ---
 
@@ -264,25 +276,28 @@ Index is `GET {urlbase}{$}` so `GET /` is not a ServeMux prefix match (that woul
 | POST | `{urlbase}api/auth/logout` | none | — | Clears session cookie |
 | GET | `{urlbase}api/auth/me` | yes | any auth | Session / key / proxy identity + permissions, `header`, `clientIP`, `upstreamAllowed`. `headers` (this request minus the Trust exclusion list) only with `system:headers:read` |
 | GET | `{urlbase}api/stats` | yes | `system:stats:read` | Queue counts + hook counters |
-| GET | `{urlbase}api/system` | yes | `system:info:read` | Version, uptime, bind addr, urlbase, auth type, metrics flag, config file, GOOS |
+| GET | `{urlbase}api/system` | yes | `system:info:read` | Version, uptime, bind addr, urlbase, auth type, metrics flag, config file, hostname, GOOS, log folders |
 | GET | `{urlbase}api/system/export` | yes | `system:info:read` | Startup-log style live rundown; each section also needs `config:{section}:read` (or `*`); omitted sections say so. Secrets omitted. |
 | GET | `{urlbase}api/queue` | yes | `system:queue:read` | In-flight items |
+| GET | `{urlbase}api/queue/item` | yes | `system:queue:read` | `?id=`; one live item, incl. newFiles/origFiles; 400 without id, 404 unknown |
 | POST | `{urlbase}api/queue/retry` | yes | `system:queue:write` | `{id}`; only `extractfailed`; Starr → `WAITING`; folder resets on main loop |
 | POST | `{urlbase}api/queue/forget` | yes | `system:queue:write` | Terminal statuses only; in-progress **409**; Starr titles get a tombstone until they leave the upstream queue |
 | GET | `{urlbase}api/history` | yes | `system:history:read` | Durable JSONL-backed rows |
-| POST | `{urlbase}api/history/clear` | yes | `system:history:write` | |
-| POST | `{urlbase}api/history/delete` | yes | `system:history:write` | `{id}` |
+| POST | `{urlbase}api/history/clear` | yes | `system:history:write` | Finished rows only; keeps queued/extracting/extracted/deleting resume checkpoints |
+| POST | `{urlbase}api/history/delete` | yes | `system:history:write` | `{id}`; in-progress **409** |
 | GET | `{urlbase}api/browse` | yes | `system:browse:read` | `?dir=`; empty → home; file path lists parent; unreadable path (Stat or ReadDir) with readable parent is 200 + `error`; both fail → 406. `mom` is empty at a volume root. Windows empty/`/`/`\` lists `C:\`–`Z:\` that exist. |
 | POST | `{urlbase}api/browse` | yes | `system:browse:write` | `{path}`; folder `MkdirAll` 0755 (existing folders succeed) |
+| POST | `{urlbase}api/browse/template` | yes | `system:browse:write` | `{path, template}`; writes `unpackerr-webhook-<template>.tmpl` (0644) with the built-in Go template; basename must match; 409 if the file exists |
 | GET | `{urlbase}api/config/help` | yes | any auth | English field help from definitions.yml |
-| GET | `{urlbase}api/config/env` | yes | any auth | UN_* overlays from startup; secret values blank unless `*` |
+| GET | `{urlbase}api/config/env` | yes | any auth | UN_* overlays from startup; secret values blank unless `*`; `WEBSERVER_UI_PASSWORD` always blank (key kept so the UI can lock the field) |
 | GET | `{urlbase}api/config/{section}` | yes | `config:{section}:read` | File snapshot |
 | GET | `{urlbase}api/config/{section}/live` | yes | `config:{section}:read` | Running copy |
 | PUT | `{urlbase}api/config/{section}` | yes | `config:{section}:write` | Replace section |
+| POST | `{urlbase}api/config/{section}/test` | yes | `config:{section}:write` | Starr queue probe or one-shot hook Fire. Does not persist. general/webserver/folders/hooks → 400. Remote failure → 424 |
 | GET | `/metrics` (+ urlbase) | **API key / Bearer only** | `system:metrics:read` | No session cookie, no webauth/noauth |
 | GET | `/debug/pprof/…` | none extra | — | Only if `pprof = true`. Treat as a loaded gun. |
 
-`{section}` is one of: `general`, `webserver`, `sonarr`, `radarr`, `lidarr`, `readarr`, `folders`, `webhooks`, `cmdhooks`. Unknown → 404 from `requireConfigPerm`.
+`{section}` is one of: `general`, `webserver`, `sonarr`, `radarr`, `lidarr`, `readarr`, `folders`, `hooks`, `webhooks`, `cmdhooks`. Unknown → 404 from `requireConfigPerm`.
 
 Stdlib mux does **not** redirect trailing slashes the way httprouter did. `/api/stats/` is 404. Documented as acceptable for this API (no external consumers). Do not add a compatibility wrapper unless product asks.
 
@@ -295,11 +310,13 @@ Order in `authenticate`:
 1. `X-Api-Key` (exact key lookup → that key’s permissions)
 2. `Authorization: Bearer …` (same)
 3. Proxy `webauth` / header auth if `ui_password` is that type **and** `RemoteAddr` is in `upstreams`
-4. Session cookie (login). Session identity gets **all** permissions and the generated/admin API key in `authInfo.apiKey`.
+4. Session cookie (login). Session identity gets **all** permissions and the generated/admin API key in `authInfo.apiKey`. A leftover password session is **not** used when `ui_password` is `webauth` or `noauth`.
 
 `noauth` is a `ui_password` type for the UI, not “skip API auth”.
 
-Login body: PBKDF2-HMAC-SHA-256 of the password, salt `unpackerr:`+username, 210000 iterations, 32-byte hex in `kdf`. Never send plaintext. Default username `admin` if `name` omitted. `webauth` login returns **403**.
+`webauth` requires the username header. `ui_role_header` empty keeps those proxy users as admin. Once a header name is set, matching values are built-in `admin` or a `[webserver.roles]` name (comma, semicolon, pipe, or space lists are unioned; extra IdP groups are ignored). Missing, empty, or no match is **401**, not admin. `noauth` ignores `ui_role_header`; its username header is optional identity only.
+
+Login body: PBKDF2-HMAC-SHA-256 of the password, salt `unpackerr:`+username, 210000 iterations, 32-byte hex in `kdf`. Never send plaintext. Default username `admin` if `name` omitted. `webauth` login returns **403**. UI `GET /api/auth/me` 401 includes `"auth":"header"` or `"noauth"` when password login is off so the SPA can show Logins Disabled instead of a password form.
 
 Metrics (`requirePermHTTP`) ignore cookies and proxy auth on purpose so a stolen browser session cannot scrape Prometheus.
 
@@ -323,11 +340,13 @@ Custom roles are a map of name → permission list. Env for roles is picky: do *
 
 Path: next to the log file if rotating, else next to the config file, else `~/.unpackerr/unpackerr.history.jsonl`.
 
-Append-only one line per durable transition (`extractfailed`, `extractednothing`, `imported`, `deleted`, `deletefailed`). Compact on load and when appends reach `2 × keep_history`. `histMu` covers records + file; HTTP reads, main loop appends.
+Append-only one line per persisted transition (`queued`, `extracting`, `extractfailed`, `extracted`, `extractednothing`, `imported`, `deleting`, `deleted`, `deletefailed`). Compact on load and when appends reach `2 × keep_history`. `histMu` covers records + file; HTTP reads, main loop appends. `GET /api/history` still returns only completed or failed rows. `keep_history` caps those durable rows only; in-progress checkpoints (`queued` / `extracting` / `extracted` / `deleting`) sit on top until they finish. Clear and delete skip those rows so a UI clear cannot wipe restart resume; delete of those IDs is **409**. The live hub upserts only durable rows and sends `delete` for an in-flight ID so the UI history table does not keep extracting items.
 
-This file is **ours**. Do not add line-length caps, atomic rename, or `.bak` “hardening”.
+On startup (after `validateApps`) rows newer than 72 hours are copied into `History.Map` so a crash can resume import-wait and delete-delay. `queued` becomes `waiting` (extract again). `extracting` / `deleting` become `extractfailed` so remnant cleanup can run on retry. Folder rows use the same mapping for `queued` / `extracting` / `extracted` / `extractfailed` / `extractednothing`; `PollFolders` then `seedFolderTracker` copies those Map items onto the watch tracker (live `delete_after` / retry). A restored folder whose watch path is gone is dropped. Forgotten folder rows stay out of Map and do not get a Starr tombstone (fsnotify can rediscover them). Forgotten Starr rows stay in the file with `forgotten: true` and are not put back on the live queue (the in-memory tombstone is rehydrated so a poll cannot recreate them). `sweepForgotten` waits until every configured Starr instance has polled this process before dropping a tombstone; a nil queue is not absence. `checkQueueChanges` must not treat `Queue == nil` as imported — that is “never polled this process”, not an empty queue. Startup pairs `retrieveAppQueues` with `checkQueueChanges`. `checkExtractDone` does not delete an `IMPORTED` item that is still in a polled Starr queue, or before that poll.
 
-`keep_history = 0` disables. Turning it on via general PUT loads the file on the main loop.
+This file is **ours**. Do not add line-length caps, atomic rename, or `.bak` hardening.
+
+`keep_history = 0` disables the file and restart resume. Turning it on via general PUT loads the file on the main loop and restores recent rows.
 
 ---
 
@@ -336,12 +355,14 @@ This file is **ours**. Do not add line-length caps, atomic rename, or `.bak` “
 | Lock | Guards |
 | --- | --- |
 | (none — main loop) | live `Config` minus webserver auth, `Map`, folders, tickers, `pendingRestart` |
-| `configMu` | `fileConfig` + hook slices `/api/stats` counts |
+| `configMu` | `fileConfig` + hook/Starr/folder maps `/api/stats` counts |
 | `uiPassMu` | live webserver auth fields HTTP reads |
 | `histMu` | history records + JSONL |
-| `History.mu` | extract map for HTTP queue GET |
+| `History.mu` | extract map; Starr poll snapshot (`Queue`, `lastQueued`, `lastRetrieved`, `lastPolled`, `lastPollErr`) |
 
 `syncFileUIPassword` takes `uiPassword()` (uiPassMu) **then** `configMu`. That order is intentional.
+
+`GET /api/stats` takes `History.mu` **then** `configMu`. `commitConfig` holds `configMu` and must not take `History.mu`. Enabling `keep_history` at runtime loads/restores **after** `commitConfig` returns.
 
 The tray reads live `Config` in `readyTray` **before** `go u.Run()`. A PUT cannot apply until the loop exists and drains `taskChan`. That is not a race.
 
@@ -374,8 +395,9 @@ Two admins saving at once is not a design target. Do not add snapshot-merge.
 | general | Yes; `resetTickers`; expand passwords | Logger / parallel / file+dir mode / timeout / delete_delay |
 | webserver | Auth fields in place | listen, urlbase, TLS, metrics, pprof, HTTP log |
 | sonarr…readarr | Rebuild clients, carry queues, grow workers | No |
-| folders | Live slices updated | **Always** (watcher) |
-| webhooks / cmdhooks | Replace lists, ensure worker | No |
+| folders | Live map updated | **Always** (watcher) |
+| hooks | Replace custom_ids map / titles struct | No |
+| webhooks / cmdhooks | Replace maps, ensure worker | No |
 
 ---
 

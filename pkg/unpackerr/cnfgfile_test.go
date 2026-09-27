@@ -1,6 +1,7 @@
 package unpackerr
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -161,10 +162,10 @@ func TestWriteConfigFileKeepsFilepathAfterParse(t *testing.T) {
 
 	unpack := New()
 	unpack.ConfigFile = filepath.Join(dir, "unpackerr.conf")
-	unpack.Sonarr = []*SonarrConfig{{
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{
 		URL:    "http://127.0.0.1:8989",
 		APIKey: filePrefix + keyFile,
-	}}
+	}})
 
 	unpack.snapshotFileConfig()
 
@@ -172,8 +173,8 @@ func TestWriteConfigFileKeepsFilepathAfterParse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if unpack.Sonarr[0].APIKey != secret {
-		t.Fatalf("Parse should expand api_key, got %q", unpack.Sonarr[0].APIKey)
+	if unpack.Sonarr["0"].APIKey != secret {
+		t.Fatalf("Parse should expand api_key, got %q", unpack.Sonarr["0"].APIKey)
 	}
 
 	if err := unpack.writeConfigFile(); err != nil {
@@ -195,8 +196,9 @@ func TestWriteConfigFileKeepsFilepathAfterParse(t *testing.T) {
 		t.Fatalf("decode: %v\n%s", err, text)
 	}
 
-	if len(loaded.Sonarr) != 1 || loaded.Sonarr[0].APIKey != filePrefix+keyFile {
-		t.Fatalf("api_key %q", loaded.Sonarr[0].APIKey)
+	got := loaded.Sonarr["0"]
+	if len(loaded.Sonarr) != 1 || got == nil || got.APIKey != filePrefix+keyFile {
+		t.Fatalf("api_key %+v\n%s", loaded.Sonarr, text)
 	}
 }
 
@@ -226,7 +228,7 @@ func TestUnmarshalConfigDoesNotPersistEnvSecrets(t *testing.T) {
 		t.Fatal("live config should take UN_DEBUG")
 	}
 
-	if len(unpack.Sonarr) != 1 || unpack.Sonarr[0].APIKey != secret {
+	if len(unpack.Sonarr) != 1 || unpack.Sonarr["0"].APIKey != secret {
 		t.Fatalf("live sonarr %+v", unpack.Sonarr)
 	}
 
@@ -257,19 +259,19 @@ func TestUnmarshalConfigDoesNotPersistEnvSecrets(t *testing.T) {
 	}
 }
 
-func TestUnmarshalConfigAdoptsWhisparrBeforePersist(t *testing.T) {
-	t.Parallel()
-
+func TestUnmarshalConfigKeepsFileInstanceFieldsAcrossEnvURL(t *testing.T) {
 	dir := t.TempDir()
 	conf := filepath.Join(dir, "unpackerr.conf")
-	key := strings.Repeat("b", apiKeyMinLength)
-	body := "[webserver]\nlisten_addr = \"127.0.0.1:0\"\nui_password = \"\"\n\n" +
-		"[[radarr]]\nurl = \"http://radarr:7878\"\napi_key = \"" + strings.Repeat("a", apiKeyMinLength) + "\"\n\n" +
-		"[[whisparr]]\nurl = \"http://whisparr:6969\"\napi_key = \"" + key + "\"\n"
+	secret := strings.Repeat("F", 32)
+	body := "[webserver]\nlisten_addr = \"127.0.0.1:0\"\nui_password = \"\"\n" +
+		"[sonarr.0]\nurl = \"http://file.invalid:8989\"\napi_key = \"" + secret + "\"\n" +
+		"name = \"uhd\"\npaths = [\"/downloads/tv\"]\n"
 
 	if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
+	t.Setenv("UN_SONARR_0_URL", "http://127.0.0.1:8989")
 
 	unpack := New()
 	unpack.ConfigFile = conf
@@ -278,12 +280,22 @@ func TestUnmarshalConfigAdoptsWhisparrBeforePersist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(unpack.Whisparr) != 0 {
-		t.Fatalf("live whisparr leftover: %d", len(unpack.Whisparr))
+	got := unpack.Sonarr["0"]
+	if got == nil {
+		t.Fatal("live sonarr.0 missing")
 	}
 
-	if unpack.fileConfig == nil || len(unpack.fileConfig.Whisparr) != 0 {
-		t.Fatalf("file whisparr leftover: %+v", unpack.fileConfig)
+	if got.URL != "http://127.0.0.1:8989" {
+		t.Fatalf("live url %q", got.URL)
+	}
+
+	if got.APIKey != secret || got.Name != "uhd" || len(got.Paths) != 1 || got.Paths[0] != "/downloads/tv" {
+		t.Fatalf("ParseENV replaced file instance fields: %+v", got)
+	}
+
+	file := unpack.fileConfig.Sonarr["0"]
+	if file == nil || file.URL != "http://file.invalid:8989" || file.APIKey != secret {
+		t.Fatalf("file snapshot took the env URL: %+v", unpack.fileConfig.Sonarr)
 	}
 
 	written, err := os.ReadFile(conf)
@@ -292,47 +304,8 @@ func TestUnmarshalConfigAdoptsWhisparrBeforePersist(t *testing.T) {
 	}
 
 	text := string(written)
-	if strings.Contains(text, "[[whisparr]]") {
-		t.Fatalf("password persist dropped [[whisparr]] instead of folding it:\n%s", text)
-	}
-
-	if !strings.Contains(text, "http://whisparr:6969") || !strings.Contains(text, "[[radarr]]") {
-		t.Fatalf("folded whisparr missing from radarr persist:\n%s", text)
-	}
-}
-
-func TestWriteConfigFileAdoptsWhisparr(t *testing.T) {
-	t.Parallel()
-
-	unpack := New()
-	unpack.ConfigFile = filepath.Join(t.TempDir(), "unpackerr.conf")
-	unpack.Radarr = []*RadarrConfig{{
-		URL:    "http://radarr:7878",
-		APIKey: strings.Repeat("a", apiKeyMinLength),
-	}}
-	unpack.Whisparr = []*RadarrConfig{{
-		URL:    "http://whisparr:6969",
-		APIKey: strings.Repeat("b", apiKeyMinLength),
-	}}
-	unpack.snapshotFileConfig()
-	unpack.adoptWhisparr()
-
-	if err := unpack.writeConfigFile(); err != nil {
-		t.Fatal(err)
-	}
-
-	written, err := os.ReadFile(unpack.ConfigFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	text := string(written)
-	if strings.Contains(text, "[[whisparr]]") {
-		t.Fatalf("--reset persist dropped [[whisparr]]:\n%s", text)
-	}
-
-	if !strings.Contains(text, "http://whisparr:6969") {
-		t.Fatalf("folded whisparr url missing:\n%s", text)
+	if strings.Contains(text, "http://127.0.0.1:8989") {
+		t.Fatalf("env URL leaked into the config file:\n%s", text)
 	}
 }
 
@@ -440,9 +413,19 @@ func TestConfigTOMLTagsInSchema(t *testing.T) {
 	}
 
 	skip := map[string]struct{}{
-		"path":     {}, // legacy StarrConfig alias for paths
-		"key":      {}, // nested [[webserver.api_keys]]; parent api_keys is in the schema
-		"whisparr": {}, // accepted on load, folded into [[radarr]]
+		"path": {}, // legacy StarrConfig alias for paths
+		"key":  {}, // nested [[webserver.api_keys]]; parent api_keys is in the schema
+		// nested [hooks.titles]; parent titles is in the schema
+		"waiting":          {},
+		"queued":           {},
+		"extracting":       {},
+		"extractfailed":    {},
+		"extracted":        {},
+		"imported":         {},
+		"deleting":         {},
+		"deletefailed":     {},
+		"deleted":          {},
+		"extractednothing": {},
 	}
 
 	missing := missingSchemaTags(reflect.TypeFor[Config](), schema.ParamNames(), skip)
@@ -457,13 +440,13 @@ func liveWriteUnpackerr(dir, passFile string) *Unpackerr {
 	unpack.Config.Debug = true
 	unpack.Passwords = StringSlice{"filepath:" + passFile}
 	unpack.Webserver.Pprof = true
-	unpack.Folders = []*FolderConfig{{Path: "/downloads/watch"}}
-	unpack.Webhook = []*WebhookConfig{{
+	unpack.Folders = instanceMap([]*FolderConfig{{Path: "/downloads/watch"}})
+	unpack.Webhook = instanceMap([]*WebhookConfig{{
 		URL:    "https://example.invalid/hook",
 		Token:  "tok",
 		Events: ExtractStatuses{QUEUED, EXTRACTED},
-	}}
-	unpack.Sonarr = []*SonarrConfig{{
+	}})
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{
 		URL:      "http://127.0.0.1:8989",
 		APIKey:   strings.Repeat("a", 32),
 		HTTPUser: "basicuser",
@@ -472,7 +455,7 @@ func liveWriteUnpackerr(dir, passFile string) *Unpackerr {
 		Password: "nativepass",
 		ValidSSL: true,
 		Paths:    StringSlice{"/custom"},
-	}}
+	}})
 
 	return unpack
 }
@@ -512,20 +495,20 @@ func assertLiveWriteLoaded(t *testing.T, loaded *Unpackerr, passFile string) {
 		t.Fatal("pprof")
 	case len(loaded.Passwords) != 1 || loaded.Passwords[0] != "filepath:"+passFile:
 		t.Fatalf("passwords %q", loaded.Passwords)
-	case len(loaded.Folders) != 1 || loaded.Folders[0].Path != "/downloads/watch":
+	case len(loaded.Folders) != 1 || loaded.Folders["0"].Path != "/downloads/watch":
 		t.Fatal("folder path")
-	case loaded.Folders[0].DeleteAfter != nil:
+	case loaded.Folders["0"].DeleteAfter != nil:
 		t.Fatal("nil delete_after should stay unset")
-	case len(loaded.Webhook) != 1 || loaded.Webhook[0].Token != "tok":
+	case len(loaded.Webhook) != 1 || loaded.Webhook["0"].Token != "tok":
 		t.Fatal("webhook token")
-	case len(loaded.Webhook[0].Events) != 2 ||
-		loaded.Webhook[0].Events[0] != QUEUED || loaded.Webhook[0].Events[1] != EXTRACTED:
-		t.Fatalf("webhook events %v", loaded.Webhook[0].Events)
-	case len(loaded.Sonarr) != 1 || !loaded.Sonarr[0].ValidSSL:
+	case len(loaded.Webhook["0"].Events) != 2 ||
+		loaded.Webhook["0"].Events[0] != QUEUED || loaded.Webhook["0"].Events[1] != EXTRACTED:
+		t.Fatalf("webhook events %v", loaded.Webhook["0"].Events)
+	case len(loaded.Sonarr) != 1 || !loaded.Sonarr["0"].ValidSSL:
 		t.Fatal("valid_ssl")
-	case loaded.Sonarr[0].HTTPUser != "basicuser" || loaded.Sonarr[0].HTTPPass != "basicpass":
+	case loaded.Sonarr["0"].HTTPUser != "basicuser" || loaded.Sonarr["0"].HTTPPass != "basicpass":
 		t.Fatal("http basic auth")
-	case loaded.Sonarr[0].Username != "nativeuser" || loaded.Sonarr[0].Password != "nativepass":
+	case loaded.Sonarr["0"].Username != "nativeuser" || loaded.Sonarr["0"].Password != "nativepass":
 		t.Fatal("native auth")
 	}
 }
@@ -632,31 +615,31 @@ func TestWriteConfigFileFullRoundTrip(t *testing.T) { //nolint:funlen // one fie
 		}
 	}
 
-	unpack.Sonarr = []*SonarrConfig{{StarrConfig: starrConf("http://sonarr:8989")}}
-	unpack.Radarr = []*RadarrConfig{
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{StarrConfig: starrConf("http://sonarr:8989")}})
+	unpack.Radarr = instanceMap([]*RadarrConfig{
 		{StarrConfig: starrConf("http://radarr:7878")},
 		{StarrConfig: starrConf("http://whisparr:6969")},
-	}
-	unpack.Lidarr = []*LidarrConfig{{StarrConfig: starrConf("http://lidarr:8686"), SplitFlac: true}}
-	unpack.Readarr = []*ReadarrConfig{{StarrConfig: starrConf("http://readarr:8787")}}
-	unpack.Readarr[0].APIKey = starrKey
-	unpack.Folder.Interval = cnfg.Duration{Duration: 4 * time.Second}
+	})
+	unpack.Lidarr = instanceMap([]*LidarrConfig{{StarrConfig: starrConf("http://lidarr:8686"), SplitFlac: true}})
+	unpack.Readarr = instanceMap([]*ReadarrConfig{{StarrConfig: starrConf("http://readarr:8787")}})
+	unpack.Readarr["0"].APIKey = starrKey
 	unpack.Folder.Buffer = 5000
-	unpack.Folders = []*FolderConfig{{
+	unpack.Folders = instanceMap([]*FolderConfig{{
 		Path: "/watch", ExtractPath: "/extracted", DeleteOrig: true, MoveBack: true, ExtractISOs: true,
+		Interval:    cnfg.Duration{Duration: 4 * time.Second},
 		DeleteAfter: &cnfg.Duration{Duration: 11 * time.Minute}, MaxNested: 2, MaxFiles: 99, MaxRatio: 3.5,
 		ExcludePaths: []string{"/watch/skip"},
-	}}
-	unpack.Webhook = []*WebhookConfig{{ //nolint:gosec // filepath: reference, not a credential.
+	}})
+	unpack.Webhook = instanceMap([]*WebhookConfig{{ //nolint:gosec // filepath: reference, not a credential.
 		Name: "discord", URL: "https://discord.example/hook", CType: "text/plain",
 		Timeout: cnfg.Duration{Duration: 9 * time.Second}, IgnoreSSL: true, Silent: true,
 		Events: ExtractStatuses{EXTRACTED, EXTRACTFAILED}, Exclude: hooks.StringSlice{"lidarr"},
 		Nickname: "Bot", Token: "filepath:/run/secrets/hook", Channel: "general",
-	}}
-	unpack.Cmdhook = []*WebhookConfig{{
+	}})
+	unpack.Cmdhook = instanceMap([]*WebhookConfig{{
 		Name: "notify", Command: "/usr/local/bin/notify.sh --flag", Shell: true,
 		Timeout: cnfg.Duration{Duration: 5 * time.Second}, Events: ExtractStatuses{IMPORTED},
-	}}
+	}})
 	unpack.snapshotFileConfig()
 
 	if err := unpack.writeConfigFile(); err != nil {
@@ -740,18 +723,55 @@ func TestEnvSuffixesAndSecrets(t *testing.T) {
 			t.Fatalf("unexpected secret %s", name)
 		}
 	}
+
+	if !envAlwaysRedact("WEBSERVER_UI_PASSWORD") {
+		t.Fatal("expected ui password always redacted")
+	}
+
+	if envAlwaysRedact("WEBSERVER_ROLES_ui_password_PERMISSIONS_0") {
+		t.Fatal("role names that contain ui_password must not always-redact")
+	}
+
+	if envAlwaysRedact("SONARR_0_API_KEY") {
+		t.Fatal("starr keys stay visible to * via env GET")
+	}
+}
+
+func TestEnvValueSecretHookHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"WEBHOOK_discord_HEADERS_Authorization",
+		"WEBHOOK_0_HEADERS_CF-Access-Client-Secret",
+		"WEBHOOK_ntfy_HEADERS_X-Api-Key",
+		"CMDHOOK_echo_HEADERS_Cookie",
+	} {
+		if !envValueSecret(name) {
+			t.Fatalf("expected secret %s", name)
+		}
+	}
+
+	for _, name := range []string{
+		"WEBHOOK_discord_HEADERS_Title",
+		"WEBHOOK_discord_HEADERS_CF-Access-Client-Id",
+		"WEBSERVER_SSL_KEY_FILE",
+	} {
+		if envValueSecret(name) {
+			t.Fatalf("unexpected secret %s", name)
+		}
+	}
 }
 
 func TestValidateSonarrSkipsShortAPIKey(t *testing.T) {
 	t.Parallel()
 
 	unpack := New()
-	unpack.Sonarr = []*SonarrConfig{{
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{
 		URL:    "http://127.0.0.1:8989",
 		APIKey: "short",
-	}}
+	}})
 
-	if err := validateStarrList(unpack, &unpack.Sonarr, starr.Sonarr); err != nil {
+	if err := validateStarrList[SonarrConfig, *SonarrConfig](unpack, unpack.Sonarr, starr.Sonarr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -794,7 +814,7 @@ func TestValidateAppUsesInstanceLabel(t *testing.T) {
 	conf.URL = "ftp://127.0.0.1:8989"
 	conf.APIKey = key
 
-	err := unpack.validateApp(conf, starr.Sonarr)
+	err := unpack.validateApp(conf, starr.Sonarr, "uhd")
 	if err == nil || !strings.Contains(err.Error(), "Sportarr") {
 		t.Fatalf("invalid URL: %v", err)
 	}
@@ -803,7 +823,7 @@ func TestValidateAppUsesInstanceLabel(t *testing.T) {
 	conf.URL = "http://127.0.0.1:8989"
 	conf.APIKey = "short"
 
-	err = unpack.validateApp(conf, starr.Sonarr)
+	err = unpack.validateApp(conf, starr.Sonarr, "uhd")
 	if err == nil || !strings.Contains(err.Error(), "Sportarr") {
 		t.Fatalf("short key: %v", err)
 	}
@@ -812,9 +832,38 @@ func TestValidateAppUsesInstanceLabel(t *testing.T) {
 	conf.URL = "http://127.0.0.1:8989"
 	conf.APIKey = key
 
-	err = unpack.validateApp(conf, starr.Sonarr)
+	err = unpack.validateApp(conf, starr.Sonarr, "uhd")
 	if err == nil || !strings.Contains(err.Error(), "Sportarr") {
 		t.Fatalf("max bytes: %v", err)
+	}
+}
+
+func TestValidateAppSkipLogsInstanceSlug(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	unpack := New()
+	unpack.Error.SetOutput(&logs)
+
+	err := unpack.validateApp(&StarrConfig{}, starr.Readarr, "0")
+	if !errors.Is(err, ErrInvalidURL) {
+		t.Fatalf("empty URL: %v", err)
+	}
+
+	if !strings.Contains(logs.String(), `instance "0"`) {
+		t.Fatalf("skip log missing slug: %q", logs.String())
+	}
+
+	logs.Reset()
+
+	err = unpack.validateApp(&StarrConfig{URL: "http://127.0.0.1:8787"}, starr.Readarr, "books")
+	if !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("empty key: %v", err)
+	}
+
+	if !strings.Contains(logs.String(), `instance "books"`) {
+		t.Fatalf("skip log missing slug: %q", logs.String())
 	}
 }
 
@@ -822,18 +871,40 @@ func TestValidateStarrListRejectsBadName(t *testing.T) {
 	t.Parallel()
 
 	unpack := New()
-	unpack.Sonarr = []*SonarrConfig{{
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{
 		Name:   `Sport"arr`,
 		URL:    "http://127.0.0.1:8989",
 		APIKey: strings.Repeat("a", apiKeyMinLength),
-	}}
+	}})
 
-	err := validateStarrList(unpack, &unpack.Sonarr, starr.Sonarr)
+	err := validateStarrList[SonarrConfig, *SonarrConfig](unpack, unpack.Sonarr, starr.Sonarr)
 	if !errors.Is(err, ErrInvalidName) {
 		t.Fatalf("got %v want ErrInvalidName", err)
 	}
 
+	if !strings.Contains(err.Error(), `instance "0"`) {
+		t.Fatalf("fatal error missing slug: %v", err)
+	}
+
 	if len(unpack.Sonarr) != 1 {
 		t.Fatalf("bad name must not skip the instance, got %d", len(unpack.Sonarr))
+	}
+}
+
+func TestClampConfigCanonicalizesUnixModes(t *testing.T) {
+	t.Parallel()
+
+	cfg := New().Config
+	cfg.FileMode = "0644"
+	cfg.DirMode = "0755"
+	cfg.LogFileMode = "0600"
+
+	fileMode, dirMode := clampConfig(cfg)
+	if cfg.FileMode != "644" || cfg.DirMode != "755" || cfg.LogFileMode != "600" {
+		t.Fatalf("canonical modes %q %q %q", cfg.FileMode, cfg.DirMode, cfg.LogFileMode)
+	}
+
+	if fileMode != defaultFileMode || dirMode != defaultDirMode {
+		t.Fatalf("parsed %d %d", fileMode, dirMode)
 	}
 }
