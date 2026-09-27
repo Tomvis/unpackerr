@@ -8,13 +8,20 @@
 # Do not regenerate - edit this file, and re-stage sources around it.
 FROM golang:1.27-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS builder
 
+# Node: go generate ./frontend runs npm ci + vite for the embedded SPA (upstream,
+# 2026-09-27 merge; mirrors the repo-root Dockerfile).
+RUN apk add --no-cache git nodejs npm
+
 COPY xtractr /xtractr
 WORKDIR /src
 COPY unpackerr/main.go unpackerr/go.mod unpackerr/go.sum ./
 RUN go mod download
+COPY unpackerr/frontend/package.json unpackerr/frontend/package-lock.json ./frontend/
+RUN npm ci --prefix frontend
 COPY unpackerr/pkg pkg
 COPY unpackerr/examples examples
 COPY unpackerr/init/config init/config
+COPY unpackerr/frontend frontend
 RUN go generate ./...
 
 ARG TARGETOS
@@ -67,8 +74,10 @@ COPY --from=builder /tmp/unpackerr /unpackerr
 # Make sure we have an ssl cert chain and timezone data.
 # ffmpeg (enhanced fork): required to split APE/WV/M4A/WAV CUE albums.
 # Dropping it does NOT fail the build - split_flac just goes silently dead.
-RUN apk add --no-cache openssl tzdata ffmpeg
+RUN apk add --no-cache ca-certificates openssl tzdata curl jq ffmpeg
 
 ENV TZ=UTC
+
+EXPOSE 5656
 
 ENTRYPOINT [ "/unpackerr" ]
