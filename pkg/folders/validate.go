@@ -3,6 +3,7 @@ package folders
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"golift.io/cnfg"
 )
@@ -10,11 +11,18 @@ import (
 // ErrNilConfig is returned when a folder list contains a nil entry.
 var ErrNilConfig = errors.New("nil config entry")
 
+// ErrNoPath is returned when a folder instance has no watch path.
+var ErrNoPath = errors.New("path is required")
+
 // ValidateList applies folder defaults and parses max_bytes.
 func ValidateList(list []*FolderConfig, parseMax func(string) (uint64, bool, error)) error {
 	for idx := range list {
 		if list[idx] == nil {
 			return ErrNilConfig
+		}
+
+		if strings.TrimSpace(list[idx].Path) == "" {
+			return ErrNoPath
 		}
 
 		if list[idx].DeleteAfter == nil {
@@ -27,12 +35,13 @@ func ValidateList(list []*FolderConfig, parseMax func(string) (uint64, bool, err
 		}
 
 		list[idx].ResolvedMaxBytes = n
+		list[idx].WaitExtensions = NormalizeWaitExtensions(list[idx].WaitExtensions)
 	}
 
 	return nil
 }
 
-// CloneList copies folder configs without sharing DeleteAfter or ExcludePaths.
+// CloneList copies folder configs without sharing DeleteAfter, ExcludePaths, or WaitExtensions.
 func CloneList(src []*FolderConfig) []*FolderConfig {
 	if src == nil {
 		return nil
@@ -47,6 +56,7 @@ func CloneList(src []*FolderConfig) []*FolderConfig {
 		}
 
 		cloned.ExcludePaths = append([]string(nil), folder.ExcludePaths...)
+		cloned.WaitExtensions = append([]string(nil), folder.WaitExtensions...)
 		out[idx] = &cloned
 	}
 

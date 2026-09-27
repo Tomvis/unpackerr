@@ -3,6 +3,7 @@ package folders
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	homedir "github.com/mitchellh/go-homedir"
@@ -26,6 +27,11 @@ func Check(list []*FolderConfig, log Logs) ([]*FolderConfig, []string) {
 	)
 
 	for _, folder := range list {
+		if strings.TrimSpace(folder.Path) == "" {
+			log.Errorf("Folder (empty path): cannot watch")
+			continue
+		}
+
 		folder.Path, err = filepath.Abs(expandHomedir(folder.Path))
 		if err != nil {
 			log.Errorf("Folder '%s' (bad path): %v", folder.Path, err)
@@ -80,17 +86,43 @@ func NormalizeExcludePaths(basePath string, excludes []string) []string {
 	return cleaned
 }
 
+// PathContains reports whether item is watch or a child of watch.
+// Root paths (`/` and Windows volume roots) keep their trailing separator.
+// Windows folds case without probing the filesystem (ReFS and some network
+// mounts can be case-sensitive).
+func PathContains(watch, item string) bool {
+	return pathContains(watch, item, runtime.GOOS == "windows")
+}
+
+func pathContains(watch, item string, fold bool) bool {
+	watch = filepath.Clean(watch)
+	item = filepath.Clean(item)
+
+	if fold {
+		watch = strings.ToLower(watch)
+		item = strings.ToLower(item)
+	}
+
+	if item == watch {
+		return true
+	}
+
+	sep := string(os.PathSeparator)
+	if strings.HasSuffix(watch, sep) {
+		return strings.HasPrefix(item, watch)
+	}
+
+	return strings.HasPrefix(item, watch+sep)
+}
+
 // IsExcludedPath returns true if path is the exclude or a child of it.
 func (c *FolderConfig) IsExcludedPath(path string) bool {
 	if len(c.ExcludePaths) == 0 || path == "" {
 		return false
 	}
 
-	path = filepath.Clean(path)
-
 	for _, exclude := range c.ExcludePaths {
-		exclude = filepath.Clean(exclude)
-		if path == exclude || strings.HasPrefix(path, exclude+string(os.PathSeparator)) {
+		if PathContains(exclude, path) {
 			return true
 		}
 	}

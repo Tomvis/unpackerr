@@ -15,9 +15,10 @@ const (
 	PermReadSystemHeaders  = "system:headers:read"
 	PermReadSystemBrowse   = "system:browse:read"
 	PermWriteSystemBrowse  = "system:browse:write"
+	PermReadSystemLogs     = "system:logs:read"
 	PermAll                = "*"
 	RoleAdmin              = "admin"
-	systemPermCount        = 11
+	systemPermCount        = 12
 )
 
 // ConfigSection is a per-section config API resource name.
@@ -31,6 +32,7 @@ const (
 	SectionLidarr    ConfigSection = "lidarr"
 	SectionReadarr   ConfigSection = "readarr"
 	SectionFolders   ConfigSection = "folders"
+	SectionHooks     ConfigSection = "hooks"
 	SectionWebhooks  ConfigSection = "webhooks"
 	SectionCmdhooks  ConfigSection = "cmdhooks"
 )
@@ -40,7 +42,7 @@ func ConfigSections() []ConfigSection {
 	return []ConfigSection{
 		SectionGeneral, SectionWebserver,
 		SectionSonarr, SectionRadarr, SectionLidarr, SectionReadarr,
-		SectionFolders, SectionWebhooks, SectionCmdhooks,
+		SectionFolders, SectionHooks, SectionWebhooks, SectionCmdhooks,
 	}
 }
 
@@ -71,6 +73,7 @@ func AllPermissions() []string {
 		PermReadSystemHeaders,
 		PermReadSystemBrowse,
 		PermWriteSystemBrowse,
+		PermReadSystemLogs,
 		PermAll,
 	)
 

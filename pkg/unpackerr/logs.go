@@ -44,9 +44,15 @@ func (l *Logger) Printf(msg string, v ...any) {
 
 // Errorf writes log errors... to stdout and/or a file.
 func (l *Logger) Errorf(msg string, v ...any) {
-	err := l.Error.Output(callDepth, fmt.Sprintf(msg, v...))
+	formatted := fmt.Sprintf(msg, v...)
+
+	err := l.Error.Output(callDepth, formatted)
 	if err != nil {
 		fmt.Println("Logger Error:", err) //nolint:forbidigo
+	}
+
+	if l.onError != nil {
+		l.onError(formatted)
 	}
 }
 
@@ -57,13 +63,12 @@ func (u *Unpackerr) logCurrentQueue(now time.Time) {
 		stats.Waiting, stats.Queued, stats.Extracting, stats.Extracted, stats.Imported, stats.Failed, stats.Deleted)
 
 	u.Printf("[Unpackerr] Totals: %d retries, %d finished, %d|%d webhooks,"+
-		" %d|%d cmdhooks, stacks; event:%d, hook:%d, del:%d, up %s",
+		" %d|%d cmdhooks, stacks; fs:%d/%d, xtractr:%d/%d, folder:%d/%d, hook:%d/%d, del:%d/%d, task:%d/%d, up %s",
 		stats.Retries, stats.Finished, stats.HookOK, stats.HookFail, stats.CmdOK, stats.CmdFail,
-		len(u.folders.Events)+len(u.updates)+len(u.folders.Updates), u.hookWorker.Len(), len(u.delChan),
+		stats.StackFS.Len, stats.StackFS.Cap, stats.StackXtractr.Len, stats.StackXtractr.Cap,
+		stats.StackFolder.Len, stats.StackFolder.Cap, stats.StackHook.Len, stats.StackHook.Cap,
+		stats.StackDel.Len, stats.StackDel.Cap, stats.StackTask.Len, stats.StackTask.Cap,
 		carbon.CreateFromStdTime(version.Started).DiffAbsInString(carbon.CreateFromStdTime(now)))
-
-	u.updateTray(stats, uint(len(u.folders.Events)+len(u.updates)+
-		len(u.folders.Updates)+len(u.delChan)+u.hookWorker.Len()))
 }
 
 // setupLogging splits log write into a file and/or stdout.
@@ -149,6 +154,8 @@ func (u *Unpackerr) waitForExit() {
 
 		u.Printf("[unpackerr] Need help? %s\n=====> Exiting! Caught Signal: %v", helpLink, sig)
 
+		u.hub.shutdown()
+
 		return
 	}
 }
@@ -181,6 +188,10 @@ func (u *Unpackerr) reopenLogs() {
 }
 
 func (u *Unpackerr) updateLogOutput(writer io.Writer, errors io.Writer) {
+	tee := u.ensureAppLogTee()
+	writer = io.MultiWriter(writer, tee)
+	errors = io.MultiWriter(errors, tee)
+
 	if u.Webserver != nil && u.Webserver.LogFile != "" {
 		u.setupHTTPLogging()
 	} else {
@@ -210,13 +221,13 @@ func (u *Unpackerr) setupHTTPLogging() {
 
 	switch { // only use MultiWriter if we have > 1 writer.
 	case !u.Quiet && u.Webserver.LogFile != "":
-		u.HTTP.SetOutput(io.MultiWriter(u.httpLog, os.Stdout))
+		u.HTTP.SetOutput(io.MultiWriter(u.httpLog, os.Stdout, u.ensureHTTPLogTee()))
 	case !u.Quiet && u.Webserver.LogFile == "":
-		u.HTTP.SetOutput(os.Stdout)
+		u.HTTP.SetOutput(io.MultiWriter(os.Stdout, u.ensureHTTPLogTee()))
 	case u.Quiet && u.Webserver.LogFile == "":
-		u.HTTP.SetOutput(io.Discard)
+		u.HTTP.SetOutput(u.ensureHTTPLogTee())
 	default: // u.Config.Quiet && u.Webserver.LogFile != ""
-		u.HTTP.SetOutput(u.httpLog)
+		u.HTTP.SetOutput(io.MultiWriter(u.httpLog, u.ensureHTTPLogTee()))
 	}
 }
 

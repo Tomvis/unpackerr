@@ -17,6 +17,7 @@
     {"name": "queue"},
     {"name": "history"},
     {"name": "files"},
+    {"name": "logs"},
     {"name": "config"}
   ],
   "security": [
@@ -45,7 +46,8 @@
       "Error": {
         "type": "object",
         "properties": {
-          "error": {"type": "string"}
+          "error": {"type": "string"},
+          "auth": {"type": "string", "description": "UI auth mode on 401 when password login is disabled: header or noauth"}
         }
       },
       "LoginRequest": {
@@ -64,7 +66,7 @@
           "auth": {"type": "string"},
           "via": {"type": "string"},
           "goos": {"type": "string"},
-          "header": {"type": "string", "description": "Configured proxy auth header name (default X-Webauth-User)"},
+          "header": {"type": "string", "description": "Configured proxy username header name (default X-Webauth-User). Role mapping uses webserver.uiRoleHeader, not this field."},
           "headers": {
             "type": "object",
             "additionalProperties": {"type": "array", "items": {"type": "string"}},
@@ -90,7 +92,44 @@
           "cmdOK": {"type": "integer"},
           "cmdFail": {"type": "integer"},
           "retries": {"type": "integer"},
-          "finished": {"type": "integer"}
+          "finished": {"type": "integer"},
+          "starrs": {"type": "integer", "description": "Configured Sonarr+Radarr+Lidarr+Readarr instance count"},
+          "folders": {"type": "integer", "description": "Configured watch-folder count"},
+          "webhooks": {"type": "integer", "description": "Configured webhook count"},
+          "cmdhooks": {"type": "integer", "description": "Configured command-hook count"},
+          "stackFS": {"$ref": "#/components/schemas/BufferStat", "description": "Folder-watch filesystem event channel"},
+          "stackXtractr": {"$ref": "#/components/schemas/BufferStat", "description": "Starr extract callback channel"},
+          "stackFolder": {"$ref": "#/components/schemas/BufferStat", "description": "Folder-watch extract callback channel"},
+          "stackHook": {"$ref": "#/components/schemas/BufferStat", "description": "Webhook and command-hook delivery channel"},
+          "stackDel": {"$ref": "#/components/schemas/BufferStat", "description": "File-delete job channel"},
+          "stackTask": {"$ref": "#/components/schemas/BufferStat", "description": "Config apply and queue-action channel"},
+          "starrQueues": {
+            "type": "array",
+            "description": "Last activity-queue poll per configured Starr app",
+            "items": {
+              "type": "object",
+              "properties": {
+                "app": {"type": "string"},
+                "name": {"type": "string"},
+                "url": {"type": "string"},
+                "queued": {"type": "integer", "description": "Starr TotalRecords"},
+                "retrieved": {"type": "integer", "description": "Records returned this poll"},
+                "complete": {"type": "integer", "description": "Retrieved items with Status completed"},
+                "match": {"type": "integer", "description": "Completed items whose protocol is in this instance's protocol list"},
+                "issues": {"type": "integer", "description": "Retrieved items that failed, warned, or have a tracked-download error/warning"},
+                "downloading": {"type": "integer", "description": "Retrieved items with Status downloading"},
+                "updatedAt": {"type": "string", "format": "date-time", "description": "When this instance's queue snapshot was last fetched"},
+                "error": {"type": "string"}
+              }
+            }
+          }
+        }
+      },
+      "BufferStat": {
+        "type": "object",
+        "properties": {
+          "len": {"type": "integer", "description": "Items currently queued"},
+          "cap": {"type": "integer", "description": "Channel capacity"}
         }
       },
       "SystemInfo": {
@@ -105,7 +144,9 @@
           "auth": {"type": "string"},
           "metrics": {"type": "boolean"},
           "configFile": {"type": "string"},
-          "goos": {"type": "string"}
+          "hostname": {"type": "string"},
+          "goos": {"type": "string"},
+          "logs": {"type": "string", "description": "Unique parent folders of the app and HTTP log files, comma-separated when they differ"}
         }
       },
       "FieldHelp": {
@@ -133,9 +174,37 @@
           "outputPath": {"type": "string"},
           "status": {"type": "string"},
           "retries": {"type": "integer"},
+          "hookFail": {"type": "integer", "description": "Failed webhook or command-hook deliveries for this extract"},
           "updated": {"type": "string", "format": "date-time"},
           "progress": {"type": "string"},
-          "error": {"type": "string"}
+          "error": {"type": "string"},
+          "percent": {"type": "number", "description": "Extraction percent from xtractr.Progress (wrote/total or read/compressed)"},
+          "wrote": {"type": "integer"},
+          "total": {"type": "integer"},
+          "read": {"type": "integer"},
+          "compressed": {"type": "integer"},
+          "files": {"type": "integer"},
+          "count": {"type": "integer"},
+          "archives": {"type": "integer"},
+          "extracted": {"type": "integer"},
+          "archive": {"type": "string", "description": "Current archive path relative to the item path"},
+          "speedBps": {"type": "integer", "description": "Current archive speed over the last sample interval, bytes per second"},
+          "avgSpeedBps": {"type": "integer", "description": "Average extract speed (bytes so far / duration), bytes per second; used for ETA"},
+          "eta": {"type": "string", "format": "date-time", "description": "Estimated finish time for the current archive, from avgSpeedBps"},
+          "due": {"type": "string", "format": "date-time", "description": "When the next start, retry, cleanup, or history transition is due"},
+          "dueKind": {"type": "string", "enum": ["start", "retry", "cleanup", "history"], "description": "What due counts down toward"},
+          "note": {"type": "string", "description": "Waiting caption, such as a wait_extensions filename"},
+          "event": {"type": "string", "enum": ["fsnotify", "polling"], "description": "How this folder item arrived; omitted for Starr apps"},
+          "started": {"type": "string", "format": "date-time"},
+          "elapsed": {"type": "string", "description": "Go duration, e.g. 1m2s"},
+          "bytes": {"type": "integer"},
+          "ratio": {"type": "number"},
+          "queue": {"type": "integer", "description": "xtractr waiting count when this extract started"},
+          "output": {"type": "string", "description": "xtractr destination folder"},
+          "kind": {"type": "string", "description": "Starr dialect or Folder. app is the instance label."},
+          "ids": {"type": "object", "additionalProperties": true, "description": "Starr hook metadata such as title and downloadId"},
+          "newFiles": {"type": "array", "items": {"type": "string"}, "description": "Extracted paths; only on GET /api/queue/item"},
+          "origFiles": {"type": "array", "items": {"type": "string"}, "description": "Archive paths; only on GET /api/queue/item"}
         }
       },
       "HistoryRecord": {
@@ -148,6 +217,8 @@
           "outputPath": {"type": "string"},
           "status": {"type": "string"},
           "retries": {"type": "integer"},
+          "hookFail": {"type": "integer", "description": "Failed webhook or command-hook deliveries for this extract"},
+          "hookMessages": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Discord message id or Telegram message_id keyed by webhook or cmdhook instance slug"},
           "started": {"type": "string", "format": "date-time"},
           "updated": {"type": "string", "format": "date-time"},
           "finished": {"type": "string", "format": "date-time"},
@@ -157,7 +228,23 @@
           "ratio": {"type": "number"},
           "elapsed": {"type": "string"},
           "error": {"type": "string"},
-          "progress": {"type": "string"}
+          "progress": {"type": "string"},
+          "kind": {"type": "string", "description": "Starr dialect or Folder. app is the instance label."},
+          "deleteOrig": {"type": "boolean"},
+          "deleteDelay": {"type": "string", "description": "Go duration, e.g. 5m0s"},
+          "syncthing": {"type": "boolean"},
+          "splitFlac": {"type": "boolean"},
+          "maxBytes": {"type": "integer"},
+          "noRetry": {"type": "boolean"},
+          "newFiles": {"type": "array", "items": {"type": "string"}},
+          "origFiles": {"type": "array", "items": {"type": "string"}, "description": "Original archive paths; folder delete_orig after a restart"},
+          "extraFiles": {"type": "array", "items": {"type": "string"}, "description": "Nested extra archives; display only, not delete_orig"},
+          "preFiles": {"type": "array", "items": {"type": "string"}, "description": "Dest paths that existed before extract; used after a restart"},
+          "forgotten": {"type": "boolean", "description": "User dropped this item from the live queue; restart must not restore it"},
+          "ids": {"type": "object", "additionalProperties": true, "description": "Starr hook metadata such as title and downloadId"},
+          "event": {"type": "string", "enum": ["fsnotify", "polling"]},
+          "queue": {"type": "integer", "description": "xtractr waiting count when this extract started"},
+          "output": {"type": "string", "description": "xtractr destination folder"}
         }
       },
       "IDRequest": {
@@ -174,12 +261,220 @@
           "id": {"type": "string"}
         }
       },
+      "LogFileInfo": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "path": {"type": "string"},
+          "size": {"type": "integer"},
+          "time": {"type": "string", "format": "date-time"},
+          "mode": {"type": "string"},
+          "used": {"type": "boolean"},
+          "user": {"type": "string"}
+        }
+      },
+      "LogFileInfos": {
+        "type": "object",
+        "properties": {
+          "dirs": {"type": "array", "items": {"type": "string"}},
+          "size": {"type": "integer"},
+          "list": {"type": "array", "items": {"$ref": "#/components/schemas/LogFileInfo"}}
+        }
+      },
+      "LogLines": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"}
+        }
+      },
       "ConfigWriteReply": {
         "type": "object",
         "properties": {
           "status": {"type": "string"},
           "restartRequired": {"type": "boolean"}
         }
+      },
+      "ConfigTestRequest": {
+        "type": "object",
+        "description": "POST /api/config/{section}/test. Starr uses url/apiKey/valid_ssl/timeout (blank url/apiKey filled from the live instance matching slug). Hooks overlay non-empty form fields onto the live hook; omitted shell/ignoreSsl keep live values, present true or false override. Fires one sample payload.",
+        "properties": {
+          "slug": {"type": "string"},
+          "url": {"type": "string"},
+          "apiKey": {"type": "string"},
+          "valid_ssl": {"type": "boolean"},
+          "timeout": {"type": "string", "description": "Go duration such as 10s"},
+          "event": {"type": "string", "description": "Extract event name or number; default extracted"},
+          "app": {"type": "string", "description": "sonarr, radarr, lidarr, readarr, folder, or a named Starr instance; default sonarr"},
+          "command": {"type": "string"},
+          "token": {"type": "string"},
+          "contentType": {"type": "string"},
+          "template": {"type": "string", "description": "When non-empty, overrides the live hook template name"},
+          "templatePath": {"type": "string", "description": "When non-empty, overrides the live hook template path"},
+          "shell": {"type": "boolean", "description": "When present, overrides the live hook; omitted keeps live"},
+          "ignoreSsl": {"type": "boolean", "description": "When present, overrides the live hook; omitted keeps live"},
+          "nickname": {"type": "string"},
+          "channel": {"type": "string"},
+          "name": {"type": "string"},
+          "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Extra request headers. Applied before Content-Type and ntfy Bearer. Omitted keeps live headers."}
+        }
+      },
+      "StarrTestResult": {
+        "type": "object",
+        "properties": {
+          "queued": {"type": "integer", "description": "Starr TotalRecords"},
+          "retrieved": {"type": "integer", "description": "Records returned this poll"},
+          "torrents": {"type": "integer"},
+          "nzbs": {"type": "integer"},
+          "other": {"type": "integer", "description": "Retrieved items whose protocol is neither torrent nor usenet"},
+          "elapsed": {"type": "string", "description": "Go duration of the queue probe, rounded to 1ms"}
+        }
+      },
+      "HookTestResult": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string"},
+          "reply": {"type": "string", "description": "Remote body or command output, clipped to 2048 runes"},
+          "elapsed": {"type": "string", "description": "Go duration of Fire, rounded to 1ms"}
+        }
+      },
+      "StarrInstance": {
+        "type": "object",
+        "description": "One Sonarr, Radarr, Lidarr, or Readarr instance. The map key is the slug, not this object. name is display only. Changed in v1.0.0 (September 2026).",
+        "properties": {
+          "name": {"type": "string"},
+          "url": {"type": "string"},
+          "apiKey": {"type": "string"},
+          "httpUser": {"type": "string"},
+          "httpPass": {"type": "string"},
+          "username": {"type": "string"},
+          "password": {"type": "string"},
+          "path": {"type": "string"},
+          "paths": {"type": "array", "items": {"type": "string"}},
+          "protocols": {"type": "string"},
+          "delete_orig": {"type": "boolean"},
+          "delete_delay": {"type": "string", "description": "Go duration"},
+          "syncthing": {"type": "boolean"},
+          "valid_ssl": {"type": "boolean"},
+          "timeout": {"type": "string", "description": "Go duration"},
+          "maxBytes": {"type": "string"},
+          "split_flac": {"type": "boolean", "description": "Lidarr only"}
+        }
+      },
+      "StarrMap": {
+        "type": "object",
+        "description": "Starr instances keyed by slug (letters, digits, _, -). Empty object clears file instances. Legacy arrays still load as keys 0, 1, ….",
+        "additionalProperties": {"$ref": "#/components/schemas/StarrInstance"}
+      },
+      "FolderInstance": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "interval": {"type": "string", "description": "Go duration; 0s is off (fsnotify)"},
+          "extract_path": {"type": "string"},
+          "delete_original": {"type": "boolean"},
+          "delete_files": {"type": "boolean"},
+          "disable_log": {"type": "boolean"},
+          "move_back": {"type": "boolean"},
+          "delete_after": {"type": "string", "nullable": true, "description": "Go duration; null omits"},
+          "extract_isos": {"type": "boolean"},
+          "disableRecursion": {"type": "boolean"},
+          "maxNested": {"type": "integer"},
+          "extrasMaxDepth": {"type": "integer"},
+          "allowSymlinks": {"type": "boolean"},
+          "maxBytes": {"type": "string"},
+          "maxFiles": {"type": "integer"},
+          "maxRatio": {"type": "number"},
+          "exclude_paths": {"type": "array", "items": {"type": "string"}},
+          "wait_extensions": {"type": "array", "items": {"type": "string"}, "description": "Stay waiting while a matching file exists in the item's top folder"},
+          "skip_empty": {"type": "boolean", "description": "Do not queue folders that contain no archives"}
+        }
+      },
+      "FolderMap": {
+        "type": "object",
+        "description": "Watch folders keyed by slug. Empty object clears file folders.",
+        "additionalProperties": {"$ref": "#/components/schemas/FolderInstance"}
+      },
+      "FoldersSection": {
+        "type": "object",
+        "description": "Folders wrapper. Empty {} is 400; send buffer and folder (possibly {}).",
+        "properties": {
+          "buffer": {"type": "integer"},
+          "folder": {"$ref": "#/components/schemas/FolderMap"}
+        }
+      },
+      "HookInstance": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "url": {"type": "string"},
+          "command": {"type": "string"},
+          "contentType": {"type": "string"},
+          "templatePath": {"type": "string"},
+          "template": {"type": "string"},
+          "timeout": {"type": "string", "description": "Go duration"},
+          "shell": {"type": "boolean"},
+          "ignoreSsl": {"type": "boolean"},
+          "silent": {"type": "boolean"},
+          "events": {"type": "array", "items": {"oneOf": [{"type": "integer"}, {"type": "string"}]}},
+          "exclude": {"type": "array", "items": {"type": "string"}},
+          "nickname": {"type": "string"},
+          "token": {"type": "string"},
+          "channel": {"type": "string"},
+          "update": {"type": "boolean", "description": "Edit the previous Discord or Telegram message. Default on for those templates."},
+          "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Extra HTTP headers. Content-Type and ntfy Bearer from token are set after these."}
+        }
+      },
+      "HookMap": {
+        "type": "object",
+        "description": "Webhooks or cmdhooks keyed by slug. Empty object clears file instances. Legacy arrays still load as keys 0, 1, ….",
+        "additionalProperties": {"$ref": "#/components/schemas/HookInstance"}
+      },
+      "HookPayload": {
+        "type": "object",
+        "description": "Global [hooks] table. Empty {} is allowed. No restart.",
+        "properties": {
+          "customIDs": {"type": "object", "additionalProperties": {"type": "string"}, "description": "User-provided ids sent separately from native item ids (JSON customIDs, cmdhook UN_CUSTOM_ID_<key>)"},
+          "titles": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Per-event English title overrides; empty keeps Status.Desc()",
+            "properties": {
+              "waiting": {"type": "string"},
+              "queued": {"type": "string"},
+              "extracting": {"type": "string"},
+              "extractfailed": {"type": "string"},
+              "extracted": {"type": "string"},
+              "imported": {"type": "string"},
+              "deleting": {"type": "string"},
+              "deletefailed": {"type": "string"},
+              "deleted": {"type": "string"},
+              "extractednothing": {"type": "string"}
+            }
+          }
+        }
+      },
+      "ConfigSection": {
+        "description": "Shape depends on section. Starr (sonarr/radarr/lidarr/readarr) and destination hooks are slug maps. Folders is {buffer, folder} with folder a slug map. hooks is {customIDs, titles}. General and webserver stay objects. anyOf (not oneOf): the object alternatives overlap (optional properties, catch-all object). Changed in v1.0.0 (September 2026).",
+        "anyOf": [
+          {"$ref": "#/components/schemas/StarrMap"},
+          {"$ref": "#/components/schemas/FoldersSection"},
+          {"$ref": "#/components/schemas/HookPayload"},
+          {"$ref": "#/components/schemas/HookMap"},
+          {"type": "object", "description": "general or webserver object"}
+        ]
+      },
+      "ConfigSectionPut": {
+        "description": "Same as GET, plus legacy Starr/hook/folder arrays (loaded as keys 0, 1, …). Starr/destination-hooks {} clears file instances. Folders still needs the wrapper; folder may be {}. Empty object is 400 for general/webserver; hooks {} is allowed. Unknown fields and [null] are 400. PUT of a map writes named TOML tables. anyOf (not oneOf): the alternatives overlap.",
+        "anyOf": [
+          {"$ref": "#/components/schemas/StarrMap"},
+          {"type": "array", "items": {"$ref": "#/components/schemas/StarrInstance"}, "description": "Legacy Starr list"},
+          {"$ref": "#/components/schemas/FoldersSection"},
+          {"$ref": "#/components/schemas/HookPayload"},
+          {"$ref": "#/components/schemas/HookMap"},
+          {"type": "array", "items": {"$ref": "#/components/schemas/HookInstance"}, "description": "Legacy webhook/cmdhook list"},
+          {"type": "object", "description": "general or webserver object"}
+        ]
       },
       "BrowseDir": {
         "type": "object",
@@ -198,6 +493,20 @@
         "properties": {
           "path": {"type": "string", "description": "Folder to create (MkdirAll 0755); existing folders succeed"}
         }
+      },
+      "BrowseTemplate": {
+        "type": "object",
+        "required": ["path", "template"],
+        "properties": {
+          "path": {"type": "string", "description": "Destination file; basename must be unpackerr-webhook-<template>.tmpl"},
+          "template": {"type": "string", "enum": ["notifiarr", "discord", "telegram", "slack", "pushover", "gotify", "ntfy", "apprise", "mattermost"]}
+        }
+      },
+      "BrowseTemplateResult": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Absolute path written"}
+        }
       }
     },
     "responses": {
@@ -213,6 +522,10 @@
         "description": "Invalid JSON or validation error",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
       },
+      "Conflict": {
+        "description": "The file already exists",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      },
       "GatewayTimeout": {
         "description": "Request canceled or timed out while waiting on the main loop",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
@@ -220,6 +533,16 @@
       "PersistError": {
         "description": "Failed to write the change to disk; it will not survive a restart",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+      },
+      "FailedDependency": {
+        "description": "The remote Starr app or hook endpoint rejected the test or could not be reached",
+        "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "error": {"type": "string"},
+            "elapsed": {"type": "string", "description": "Go duration of the failed probe or Fire, rounded to 1ms"}
+          }
+        }}}
       }
     }
   },
@@ -375,6 +698,28 @@
         }
       }
     },
+    "/api/browse/template": {
+      "post": {
+        "tags": ["files"],
+        "summary": "Write a built-in webhook template file",
+        "description": "Requires system:browse:write. Writes unpackerr-webhook-<template>.tmpl with the built-in Go template. Fails if the file already exists.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BrowseTemplate"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "File written",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BrowseTemplateResult"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "409": {"$ref": "#/components/responses/Conflict"},
+          "500": {"description": "Write failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
     "/metrics": {
       "get": {
         "tags": ["system"],
@@ -391,6 +736,73 @@
         }
       }
     },
+    "/ws": {
+      "get": {
+        "tags": ["system"],
+        "summary": "Authenticated websocket for live updates",
+        "description": "Requires a session cookie (or API key). Client sends {op:sub|unsub, topics, file}. Server sends hello, queue, progress, history, log, error, and denied frames. Topics: queue (system:queue:read), history (system:history:read), logs (system:logs:read), errors (any authenticated session).",
+        "responses": {
+          "101": {"description": "Switching Protocols"},
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/api/logs": {
+      "get": {
+        "tags": ["logs"],
+        "summary": "List current and rotated log files",
+        "description": "Requires system:logs:read. The list always includes a synthetic id \"errors\" (last 10 Errorf messages). When log_file is unset, a synthetic id \"live\" is the in-memory app log.",
+        "responses": {
+          "200": {
+            "description": "Log file list",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LogFileInfos"}}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/logs/{id}": {
+      "get": {
+        "tags": ["logs"],
+        "summary": "Read the last N lines of a log file",
+        "description": "Requires system:logs:read. lines defaults to 500 (max 10000). skip skips that many trailing lines. Synthetic ids: live (in-memory app log), errors (last 10 Errorf messages).",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "lines", "in": "query", "schema": {"type": "integer"}},
+          {"name": "skip", "in": "query", "schema": {"type": "integer"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Log text",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LogLines"}}}
+          },
+          "404": {"description": "Unknown id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/logs/{id}/download": {
+      "get": {
+        "tags": ["logs"],
+        "summary": "Download a log file as a zip",
+        "description": "Requires system:logs:read. Synthetic ids live and errors cannot be downloaded.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Zip archive",
+            "content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}}
+          },
+          "404": {"description": "Unknown id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
     "/api/queue": {
       "get": {
         "tags": ["queue"],
@@ -401,6 +813,32 @@
             "description": "Live queue",
             "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/QueueItem"}}}}
           },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/queue/item": {
+      "get": {
+        "tags": ["queue"],
+        "summary": "One in-flight extract, including archive and extracted file lists",
+        "description": "Requires system:queue:read. File lists are omitted from GET /api/queue and progress frames so large extracts stay cheap on the wire. Id is a query parameter because it is usually a filesystem path.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {"type": "string"},
+            "description": "Queue item id (usually a filesystem path)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Queue item with file lists",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/QueueItem"}}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "404": {"description": "Not in the live map", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "403": {"$ref": "#/components/responses/Forbidden"}
         }
@@ -456,7 +894,7 @@
       "get": {
         "tags": ["history"],
         "summary": "Completed and failed items (newest first)",
-        "description": "Requires system:history:read. Capped by keep_history.",
+        "description": "Requires system:history:read. Completed and failed rows are capped by keep_history. In-flight checkpoints are not listed and do not count against that cap.",
         "responses": {
           "200": {
             "description": "History",
@@ -470,8 +908,8 @@
     "/api/history/delete": {
       "post": {
         "tags": ["history"],
-        "summary": "Delete one history row",
-        "description": "Requires system:history:write",
+        "summary": "Delete one finished history row",
+        "description": "Requires system:history:write. In-progress extracts (queued, extracting, extracted, deleting) are resume checkpoints and cannot be deleted.",
         "requestBody": {
           "required": true,
           "content": {"application/json": {"schema": {"$ref": "#/components/schemas/IDRequest"}}}
@@ -482,6 +920,7 @@
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/StatusReply"}}}
           },
           "404": {"description": "Unknown id", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "409": {"description": "Id is still in progress", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "400": {"$ref": "#/components/responses/BadRequest"},
           "500": {"$ref": "#/components/responses/PersistError"},
           "401": {"$ref": "#/components/responses/Unauthorized"},
@@ -492,8 +931,8 @@
     "/api/history/clear": {
       "post": {
         "tags": ["history"],
-        "summary": "Clear all history rows",
-        "description": "Requires system:history:write",
+        "summary": "Clear finished history rows",
+        "description": "Requires system:history:write. Does not drop in-progress extracts kept for restart resume.",
         "responses": {
           "200": {
             "description": "Cleared",
@@ -509,7 +948,7 @@
       "get": {
         "tags": ["config"],
         "summary": "Environment variables that overlaid config at startup",
-        "description": "Requires authentication. Keys are UN_* suffixes (DEBUG, SONARR_0_URL). Values are the env strings cnfg wrote into fields. Password, API key, webhook token, and webserver api key values are blank unless the caller has *.",
+        "description": "Requires authentication. Keys are UN_* suffixes with the same case as the TOML map key (DEBUG, SONARR_0_URL, SONARR_uhd_URL, WEBSERVER_ROLES_stats_PERMISSIONS_0). Values are the env strings cnfg wrote into fields. Password, API key, webhook token, and webserver api key values are blank unless the caller has *. WEBSERVER_UI_PASSWORD is always blank (the key stays so the UI can lock the field).",
         "responses": {
           "200": {
             "description": "Map of env suffix to value",
@@ -547,18 +986,18 @@
           "required": true,
           "schema": {
             "type": "string",
-            "enum": ["general", "webserver", "sonarr", "radarr", "lidarr", "readarr", "folders", "webhooks", "cmdhooks"]
+            "enum": ["general", "webserver", "sonarr", "radarr", "lidarr", "readarr", "folders", "hooks", "webhooks", "cmdhooks"]
           }
         }
       ],
       "get": {
         "tags": ["config"],
         "summary": "Read the on-disk config section",
-        "description": "Requires config:{section}:read. Returns file-shaped values (filepath: prefixes kept). Starr API keys are visible as stored. Unpackerr webserver apiKeys[].key is returned only to callers with *; PUT keeps a blank key of the same name. ui_password is !!cryptd!!, webauth, noauth, or filepath:; plaintext user:pass is blanked. PUT a new password as user:<kdf-hex> (same digest as login), not plaintext. Use GET /api/config/{section}/live for expanded running values. PUT this payload back to save.",
+        "description": "Requires config:{section}:read. Returns file-shaped values (filepath: prefixes kept). Starr, folders.folder, webhooks, and cmdhooks are objects keyed by slug (v1.0.0, September 2026); env-only slugs are omitted. Starr API keys are visible as stored. Unpackerr webserver apiKeys[].key is returned only to callers with *; PUT keeps a blank key of the same name. ui_password is !!cryptd!!, webauth, noauth, or filepath:; plaintext user:pass is blanked. PUT a new password as user:<kdf-hex> (same digest as login), not plaintext. Use GET /api/config/{section}/live for expanded running values. PUT this payload back to save.",
         "responses": {
           "200": {
             "description": "On-disk section payload",
-            "content": {"application/json": {"schema": {"description": "Shape depends on section"}}}
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigSection"}}}
           },
           "404": {"description": "Unknown section", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "401": {"$ref": "#/components/responses/Unauthorized"},
@@ -568,10 +1007,10 @@
       "put": {
         "tags": ["config"],
         "summary": "Replace one config section and rewrite the TOML file",
-        "description": "Requires config:{section}:write. Body is the file-shaped GET payload (not /live). Unknown JSON fields, extra values, empty object sections, and nil list entries return 400. Arrays may be [] to clear. Validation, the TOML write, and the live apply run on the main loop; a persist failure is 500 and leaves runtime unchanged. An existing filepath: string in the same section is expanded for the running process and kept as filepath: on disk. A new or changed filepath: is 400; the API will not read a file that was not already referenced in that section. Replacing filepath: with a literal value is allowed. Empty apiKeys[].key keeps the existing key of the same name so a redacted GET can round-trip without *. webserver uiPassword on PUT is !!cryptd!!, webauth, noauth, an existing filepath:, or user:<64-char PBKDF2 hex> (the same kdf as login); plaintext user:pass is 400. Changing the live password hash or auth type while local password auth is on requires uiCurrentKdf (KDF of the current username+password). General interval changes reset the running tickers. Folder lists, webserver listen_addr, urlbase, TLS, metrics, pprof, log settings, debug, quiet, parallel, and file modes return restartRequired: true; the daemon then re-execs itself once nothing is queued, extracting, or awaiting delete. In-flight extracts are never cancelled.",
+        "description": "Requires config:{section}:write. Body is the file-shaped GET payload (not /live). Starr/hooks are slug maps; {} clears file instances (legacy [] still loads as keys 0, 1, …). Folders is {buffer, folder}; empty {} is 400, folder may be {}. PUT writes the request body as the file document; live is clone(file)+ParseENV so env-only slugs still appear after {}. Unknown JSON fields, extra values, empty general/webserver objects, and nil list entries return 400. Validation, the TOML write, and the live apply run on the main loop; a persist failure is 500 and leaves runtime unchanged. A filepath: string is expanded for the running process and kept as filepath: on disk. Adding or changing a filepath: is allowed; a missing secret file is 400. Replacing filepath: with a literal value is allowed. Empty apiKeys[].key keeps the existing key of the same name so a redacted GET can round-trip without *. webserver uiPassword on PUT is !!cryptd!!, webauth, noauth, filepath:, or user:<64-char PBKDF2 hex> (the same kdf as login); plaintext user:pass is 400. Changing the live password hash or auth type while local password auth is on requires uiCurrentKdf (KDF of the current username+password). General interval changes reset the running tickers. Folder lists, webserver listen_addr, urlbase, TLS, metrics, pprof, log settings, debug, quiet, parallel, and file modes return restartRequired: true; the daemon then re-execs itself once nothing is queued, extracting, or awaiting delete. In-flight extracts are never cancelled. Changed in v1.0.0 (September 2026).",
         "requestBody": {
           "required": true,
-          "content": {"application/json": {"schema": {"description": "Same shape as GET /api/config/{section}"}}}
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigSectionPut"}}}
         },
         "responses": {
           "200": {
@@ -595,21 +1034,59 @@
           "required": true,
           "schema": {
             "type": "string",
-            "enum": ["general", "webserver", "sonarr", "radarr", "lidarr", "readarr", "folders", "webhooks", "cmdhooks"]
+            "enum": ["general", "webserver", "sonarr", "radarr", "lidarr", "readarr", "folders", "hooks", "webhooks", "cmdhooks"]
           }
         }
       ],
       "get": {
         "tags": ["config"],
         "summary": "Read the expanded running config section",
-        "description": "Requires config:{section}:read. Most filepath: values are expanded. Archive passwords are the post-env, pre-expansion slice, so filepath: from the file or UN_PASSWORDS is not replaced with secret-file contents. Unpackerr webserver apiKeys[].key is returned only to callers with *. ui_password is the stored hash or auth mode, not plaintext. Do not PUT this payload if you need to keep filepath: lines.",
+        "description": "Requires config:{section}:read. Most filepath: values are expanded. Archive passwords are the post-env, pre-expansion slice, so filepath: from the file or UN_PASSWORDS is not replaced with secret-file contents. Starr/folders/hooks include env-created slugs; env secrets (apiKey, HTTP/native passwords, webhook token) are redacted even for *. Unpackerr webserver apiKeys[].key is returned only to callers with *. ui_password is the stored hash or auth mode, not plaintext. Do not PUT this payload if you need to keep filepath: lines.",
         "responses": {
           "200": {
             "description": "Live section payload",
-            "content": {"application/json": {"schema": {"description": "Shape depends on section"}}}
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigSection"}}}
           },
           "404": {"description": "Unknown section", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
           "504": {"$ref": "#/components/responses/GatewayTimeout"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "403": {"$ref": "#/components/responses/Forbidden"}
+        }
+      }
+    },
+    "/api/config/{section}/test": {
+      "parameters": [
+        {
+          "name": "section",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": ["general", "webserver", "sonarr", "radarr", "lidarr", "readarr", "folders", "hooks", "webhooks", "cmdhooks"]
+          }
+        }
+      ],
+      "post": {
+        "tags": ["config"],
+        "summary": "Probe a Starr instance or fire one sample hook",
+        "description": "Requires config:{section}:write (same as PUT). Does not persist. Sonarr/Radarr/Lidarr/Readarr GET the activity queue on a throwaway client and return torrent vs usenet counts; blank url/apiKey are filled from the live instance matching slug. Webhooks and cmdhooks overlay non-empty posted fields onto a clone of the live hook (or a new hook); omitted shell/ignoreSsl keep live values. Fire one sample payload. general, webserver, folders, and hooks return 400. Remote Starr/hook failures are 424.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigTestRequest"}}}
+        },
+        "responses": {
+          "200": {
+            "description": "Starr queue counts or hook delivery result",
+            "content": {"application/json": {"schema": {
+              "anyOf": [
+                {"$ref": "#/components/schemas/StarrTestResult"},
+                {"$ref": "#/components/schemas/HookTestResult"}
+              ]
+            }}}
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "404": {"description": "Unknown section", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+          "424": {"$ref": "#/components/responses/FailedDependency"},
           "401": {"$ref": "#/components/responses/Unauthorized"},
           "403": {"$ref": "#/components/responses/Forbidden"}
         }

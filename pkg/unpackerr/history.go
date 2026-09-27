@@ -1,25 +1,17 @@
 package unpackerr
 
 import (
-	"strconv"
 	"sync"
-
-	"github.com/Unpackerr/unpackerr/pkg/ui"
-)
-
-// Safety constants.
-const (
-	hist     = "hist_"
-	histNone = "hist_none"
 )
 
 // History holds the history of extracted items.
-// mu guards Map, Finished, Retries, forgotten, per-item Status/Updated, and XProg
-// progress so HTTP stats, queue snapshots, and Prometheus Collect cannot race
-// the main loop. It is not reentrant; do not lock inside a caller that already holds it.
+// mu guards Map, Finished, Retries, forgotten, per-item Status/Updated, Note,
+// HookFail, HookMessages, XProg progress, and the Starr poll snapshot (Queue,
+// lastQueued, lastRetrieved, lastPolled, lastPollErr) so HTTP stats, queue
+// snapshots, and Prometheus Collect cannot race poll workers. It is not
+// reentrant; do not lock inside a caller that already holds it.
 type History struct {
 	mu        sync.RWMutex
-	Items     []string
 	Finished  uint
 	Retries   uint
 	Map       map[string]*Extract
@@ -30,8 +22,38 @@ func (h *History) lockHistory() {
 	h.mu.Lock()
 }
 
+// unlockHistory only drops the mutex. Unpackerr.unlockHistory shadows this
+// and flushes pendingHooks after the unlock.
 func (h *History) unlockHistory() {
 	h.mu.Unlock()
+}
+
+type pendingHook struct {
+	itemID string
+	item   Extract  // status snapshot; Map can move on after History.mu drops.
+	live   *Extract // Map pointer at queue time; SaveID must not attach to a reused entry.
+}
+
+// queuePendingHook records a hook to fire after History.mu is dropped.
+// Caller must hold History.mu.
+func (u *Unpackerr) queuePendingHook(itemID string, item *Extract) {
+	if item == nil {
+		return
+	}
+
+	u.pendingHooks = append(u.pendingHooks, pendingHook{itemID: itemID, item: *item, live: item})
+}
+
+// unlockHistory drops History.mu then delivers any hooks queued while it was
+// held. Enqueue can block on a full worker, so this cannot run under the lock.
+func (u *Unpackerr) unlockHistory() {
+	pending := u.pendingHooks
+	u.pendingHooks = nil
+	u.History.unlockHistory()
+
+	for i := range pending {
+		u.runAllHooks(pending[i].itemID, &pending[i].item, pending[i].live)
+	}
 }
 
 func (h *History) rLockHistory() {
@@ -42,33 +64,10 @@ func (h *History) rUnlockHistory() {
 	h.mu.RUnlock()
 }
 
-// This is called every time an item is queued.
-func (u *Unpackerr) updateHistory(item string) {
-	if u.KeepHistory == 0 || len(u.Items) == 0 {
-		return
-	}
-
-	if ui.HasGUI() && item != "" {
-		if none := u.menu[histNone]; none != nil {
-			none.Hide()
-		}
-	}
-
-	u.Items[0] = item
-
-	// Do not process 0; this isn't an `intrange`.
-	for idx := len(u.Items) - 1; idx > 0; idx-- {
-		u.Items[idx] = u.Items[idx-1]
-		menu := u.menu[hist+strconv.Itoa(idx)]
-
-		switch {
-		case !ui.HasGUI() || menu == nil:
-			continue
-		case u.Items[idx] != "":
-			menu.SetTitle(u.Items[idx])
-			menu.Show()
-		default:
-			menu.Hide()
-		}
-	}
+// deleteExtract removes a live extract and drops its worker message-id cache.
+// Caller must hold History.mu.
+func (u *Unpackerr) deleteExtract(itemID string) {
+	live := u.Map[itemID]
+	delete(u.Map, itemID)
+	u.dropHookMessages(itemID, live)
 }

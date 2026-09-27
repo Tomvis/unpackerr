@@ -8,6 +8,7 @@ order:
   - starr_header
   - starr
   - folder
+  - hooks
   - webhook
   - cmdhook
 def_order:
@@ -116,10 +117,8 @@ recommendations:
     - name: 24 hours
       value: 24h
   folders: &FOLDER_INTERVALS
-    - name: Default (1s in Docker)
+    - name: Off
       value: 0s
-    - name: Disabled
-      value: 1ms
     - name: 1/2 second
       value: 500ms
     - name: 1 second
@@ -148,9 +147,7 @@ defs:
     sonarr:
       title: Sonarr Settings
       prefix: SONARR_
-      text: |
-        ## Leaving the [[sonarr]] header uncommented (no leading hash #) without also
-        ## uncommenting the api_key (remove the hash #) will produce a startup warning.
+      comment: true
       docker_example:
         url: http://sonarr:8989
       examples:
@@ -158,9 +155,7 @@ defs:
     radarr:
       title: Radarr Settings
       prefix: RADARR_
-      text: |
-        ## Leaving the [[radarr]] header uncommented (no leading hash #) without also
-        ## uncommenting the api_key (remove the hash #) will produce a startup warning.
+      comment: true
       docker_example:
         url: http://radarr:7878
       examples:
@@ -286,7 +281,7 @@ sections:
         short: 'POSIX mode used for new log files; not for Windows'
       - name: keep_history
         envvar: KEEP_HISTORY
-        default: 200
+        default: 400
         recommend:
           - value: 0
           - value: 5
@@ -296,6 +291,7 @@ sections:
           - value: 100
           - value: 200
           - value: 300
+          - value: 400
           - value: 500
           - value: 750
           - value: 1000
@@ -305,7 +301,15 @@ sections:
         desc: |
           How many completed or failed items to keep in unpackerr.history.jsonl
           (next to the log file, or the config file if logs go to stdout).
-          The tray menu still shows only the last 10 names. `0` disables history.
+          With neither a log file nor a config file, history stays in memory
+          for this process and is not written to disk, so it does not survive
+          a restart. Set `log_file` or use a config file to persist it.
+          In-progress extracts are also written so a restart can resume them
+          for 72 hours (Starr waiting for import, folders waiting on
+          delete_after). Those in-progress rows do not count against this
+          number. Imported and failed rows do. The history API still lists
+          only completed or failed rows.
+          `0` disables history and restart resume.
       - name: interval
         envvar: INTERVAL
         default: 2m
@@ -478,6 +482,20 @@ sections:
           config. Empty generates a temporary password when the HTTP server is enabled.
           Reset with --reset. Do not set an empty
           UN_WEBSERVER_UI_PASSWORD; a present empty env value wipes a stored hash.
+      - name: ui_role_header
+        envvar: UI_ROLE_HEADER
+        default: ''
+        short: Optional proxy header whose value is an Unpackerr role name.
+        desc: |
+          Used with webauth (proxy header auth). Empty keeps those proxy users
+          as admin. Ignored for noauth and local password login. Set this to a
+          header the reverse proxy fills, for example X-Webauth-Role or
+          X-Authentik-Groups. Matching names are a built-in admin or a custom
+          [webserver.roles] name. Comma, semicolon, pipe, or space separated
+          lists are unioned; extra IdP groups are ignored. A selected header
+          that is missing, empty, or has no matching role is access denied,
+          not admin.
+          example: ui_role_header = "X-Webauth-Role"
       - name: log_file
         envvar: LOG_FILE
         default: ''
@@ -520,6 +538,18 @@ sections:
           Setting this correctly allows X-Forwarded-For to be used in logs.
           In the future it may control auth proxy trust. Must be a list of strings.
           example: upstreams = [ "127.0.0.1/32", "10.1.2.0/24" ]
+      - name: ws_origins
+        envvar: WS_ORIGINS
+        default: []
+        kind: conlist
+        short: Extra WebSocket Origin hosts allowed besides same-origin.
+        desc: |
+          Empty keeps the library same-origin check (the embedded UI). Add hosts
+          when a browser on another origin should open GET /ws, for example
+          localhost:5173 or https://ui.example.com. Patterns use path.Match;
+          a URI scheme is matched as scheme://host. Do not set * unless you
+          intend to allow every origin.
+          example: ws_origins = [ "localhost:5173" ]
       - name: api_keys
         envvar: API_KEYS_
         default: []
@@ -555,10 +585,12 @@ sections:
       ###############################################################################
       ## The following sections can be repeated if you have more than one Sonarr,  ##
       ## Radarr, Lidarr, Readarr, Folder, Webhook, and/or Command Hook.            ##
-      ## You MUST uncomment the [[header]], url and api_key at for any Starr app.  ##
-      ## The [[sonarr]] and [[radarr]] headers come uncommented. Uncomment the url ##
-      ## and api_key if they are in use. Comment them with a hash if they are not. ##
-      ## Uncomment the [[lidarr]] and/or [[readarr]] headers and values if in use. ##
+      ## Identify each instance with a short key: [sonarr.uhd], [folder.tv].       ##
+      ## Changed in v1.0.0 (September 2026): map keys, not [[array]] list rows.    ##
+      ## You MUST uncomment the [header.0], url and api_key for any Starr app.     ##
+      ## Uncomment [sonarr.0], [radarr.0], [lidarr.0], and/or [readarr.0] plus the ##
+      ## url and api_key if that app is in use.                                    ##
+      ## Do not set a bare UN_SONARR / UN_FOLDER / UN_WEBHOOK / UN_CMDHOOK.        ##
       ###############################################################################
       ###############################################################################
       ##           ALL LINES BEGINNING WITH A HASH # ARE IGNORED COMMENTS          ##
@@ -567,7 +599,7 @@ sections:
       ###############################################################################
 
   starr:
-    kind: list
+    kind: named
     params:
       - name: name
         envvar: NAME
@@ -718,16 +750,6 @@ sections:
       ## Global Folder configuration that affects all watched folders.
     envvar_prefix: FOLDERS_
     params:
-      - name: interval
-        envvar: INTERVAL
-        default: 0s
-        docker: 1s
-        short: How often poller checks for new folders. Use `1ms` to disable it.
-        recommend: *FOLDER_INTERVALS
-        desc: |
-          How often poller checks for new folders.
-          The default of `0s` will disable the poller on all systems except Docker.
-          Set this value to `1ms` to disable it in Docker.
       - name: buffer
         envvar: BUFFER
         default: 20000
@@ -752,14 +774,26 @@ sections:
     docs: |
       Folders are a way to watch a folder for things to extract. You can use this to
       monitor your download client's "move to" path if you're not using it with a Starr app.
+      Use `[folder.software]` (env `UN_FOLDER_software_PATH`). Do not set a bare `UN_FOLDER`.
     envvar_prefix: FOLDER_
-    kind: list
+    kind: named
     params:
       - name: path
         envvar: PATH
         default: ''
         example: /downloads/auto_extract
         short: Folder to watch for archives. **Not for Starr apps.**
+      - name: interval
+        envvar: INTERVAL
+        default: 0s
+        recommend: *FOLDER_INTERVALS
+        short: How often this folder is polled. Off (`0s`) uses filesystem events.
+        desc: |
+          How often this folder is scanned for new archives.
+          Off (`0s`) uses filesystem events (inotify and friends).
+          Enable a poll interval if files never show up in the queue, which is
+          common on Docker and CIFS. Polling increases disk reads and is not
+          recommended when fsnotify works.
       - name: exclude_paths
         envvar: EXCLUDE_PATH_
         default: []
@@ -903,6 +937,69 @@ sections:
         recommend: *BOOLEAN
         short: Setting this to true enables .iso file extraction.
         desc: Set this to true if you want this app to extract ISO files with .iso extension.
+      - name: wait_extensions
+        envvar: WAIT_EXTENSION_
+        default: []
+        kind: list
+        short: Stay waiting while a top-level file with one of these extensions exists.
+        desc: |
+          Incomplete-download suffixes such as `.part` or `.crdownload`. Extraction
+          stays in waiting as long as any matching file is in the watched item's
+          top folder. Subfolders are not scanned. The UI and config always store
+          a leading period. Waiting items are rechecked every 5s even without the
+          poller. Enabling folder poller will double-poll the folder and increase
+          disk reads. Useful when fsnotify is not available, and not recommended
+          when it is.
+      - name: skip_empty
+        envvar: SKIP_EMPTY
+        default: false
+        recommend: *BOOLEAN
+        short: Do not queue folders that contain no archives.
+        desc: |
+          After start delay, skip watched folders that have no extractable archives.
+          They leave waiting without history or webhooks.
+
+  hooks:
+    title: Hook Payload
+    envvar_prefix: HOOKS_
+    text: |
+      ####################
+      ### Hook Payload ###
+      ####################
+      # Extra IDs and custom event titles shared by every webhook and command hook.
+    docs: |
+      Extra payload IDs and per-event titles for every webhook and command hook.
+      Custom IDs are separate from Starr item IDs (`ids`).
+      Empty title values keep the built-in English event title (`Status.Desc()`).
+    params:
+      - name: custom_ids
+        envvar: CUSTOM_IDS_
+        default: {}
+        kind: map
+        omit_compose: true
+        short: Extra string IDs on every hook payload, separate from Starr item IDs.
+        desc: |
+          Nested [hooks.custom_ids] table, not an inline map.
+          Webhooks get `customIDs` in JSON (`{{index .CustomIDs "url"}}` in templates).
+          Command hooks get `UN_CUSTOM_ID_<key>` environment variables.
+          Env: UN_HOOKS_CUSTOM_IDS_url=https://…
+          [hooks.custom_ids]
+          url = "https://unpackerr.example"
+      - name: titles
+        envvar: TITLES_
+        default: {}
+        kind: map
+        omit_compose: true
+        short: Override the English event title sent in hook payloads.
+        desc: |
+          Nested [hooks.titles] table with one field per extract event:
+          waiting, queued, extracting, extractfailed, extracted, imported,
+          deleting, deletefailed, deleted, extractednothing.
+          Empty values keep the built-in English title. Built-in Discord, Slack,
+          Telegram, Gotify, and Pushover templates use this string.
+          Env: UN_HOOKS_TITLES_EXTRACTING=Archive Found
+          [hooks.titles]
+          extracting = "Archive Found"
 
   webhook:
     title: Webhooks
@@ -912,28 +1009,36 @@ sections:
       ################
       # Sends a webhook when an extraction queues, starts, finishes, and/or is deleted.
       # Created to integrate with notifiarr.com.
-      # Also works natively with Discord.com, Telegram.org, and Slack.com webhooks.
+      # Also works natively with Discord.com, Telegram.org, Slack.com, ntfy, Apprise, and Mattermost webhooks.
       # Can possibly be used with other services by providing a custom template_path.
-      ###### Don't forget to uncomment [[webhook]] and url at a minimum !!!!
+      ###### Don't forget to uncomment [webhook.0] and url at a minimum !!!!
     docs: |
       This application can send a `POST` webhook to a URL when an extraction begins, and again
       when it finishes. Configure 1 or more webhook URLs with the parameters below.
       Works great with [notifiarr.com](https://notifiarr.com). You can use
       [requestbin.com](https://requestbin.com/r/) to test and _see_ the payload.
     notes: |
-      - _`Nickname` should equal the `chat_id` value in Telegram webhooks._
-      - _`Channel` is used as destination channel for Slack. It's not used in others._
-      - _`Nickname` and `Channel` may be used as custom values in custom templates._
+      - Paste a Discord, Slack, Telegram, ntfy, Apprise, Mattermost, Gotify, Pushover, or Notifiarr URL; the template is detected unless you set `template`.
+      - Discord and Telegram can edit the previous message (`update`, default on). Slack incoming webhooks cannot update; each event is a new message.
+      - Telegram: `nickname` is the `chat_id`. Pushover: `token` is the app token, `channel` is the user key, `nickname` is an optional device.
+      - Slack and Mattermost: `nickname` is the display name; `channel` is an optional override.
+      - ntfy: optional `token` as Bearer. Gotify, ntfy, and Apprise: `nickname` is an optional title prefix.
+      - Extra `headers` are sent when set; the UI shows them for a named `template` or a custom `template_path`. Content-Type and ntfy Bearer still win after those headers.
+      - Notifiarr: use `https://notifiarr.com/api/v1/notification/unpackerr` plus `headers.X-Api-Key`. A path API key (`.../unpackerr/<uuid>`) is moved to that header on start, save, and test.
+      - Empty or unknown URLs use the Notifiarr JSON payload. Set `template_path` for a custom Go template; a named `template` ignores that file.
       - _`Name` is only used in logs, but it's also available as a template value as `{{name}}`._
-      - Built-In Templates: `pushover`, `telegram`, `discord`, `notifiarr`, `slack`, `gotify`.
+      - Built-in templates: `notifiarr`, `discord`, `telegram`, `slack`, `pushover`, `gotify`, `ntfy`, `apprise`, `mattermost`.
     envvar_prefix: WEBHOOK_
-    kind: list
+    kind: named
     params:
       - name: url
         envvar: URL
         default: ''
-        example: https://notifiarr.com/api/v1/notification/unpackerr/api_key_from_notifiarr_com
+        example: https://notifiarr.com/api/v1/notification/unpackerr
         short: URL to send POST webhook to.
+        desc: |
+          Notifiarr: https://notifiarr.com/api/v1/notification/unpackerr plus headers.X-Api-Key.
+          A path API key in a pasted URL is moved to that header.
       - name: name
         envvar: NAME
         default: ''
@@ -964,20 +1069,21 @@ sections:
       - name: nickname
         envvar: NICKNAME
         default: 'Unpackerr'
-        short: Passed into templates for telegram, discord and slack hooks.
+        short: Discord/Slack/Mattermost username, Telegram chat_id, or ntfy/Gotify/Apprise title prefix.
         desc: |
           ===> Advanced Optional Webhook Configuration <===
-          Used in Discord and Slack templates as bot name, in Telegram as chat_id.
+          Discord, Slack, and Mattermost: bot/display name. Telegram: chat_id.
+          Gotify, ntfy, and Apprise: optional title prefix. Unused by Notifiarr JSON.
       - name: channel
         envvar: CHANNEL
         default: ''
-        short: Passed into templates for slack.com webhooks.
-        desc: Also passed into templates. Used in Slack templates for destination channel.
+        short: Slack/Mattermost channel override, or Pushover user key.
+        desc: Also passed into templates. Slack and Mattermost optional channel. Pushover user key.
       - name: token
         envvar: TOKEN
         default: ''
-        short: Bot token for Discord, Telegram, Slack, and similar templates.
-        desc: Passed into webhook templates. Used by Discord, Telegram, and Slack.
+        short: Pushover app token, or optional ntfy Bearer token.
+        desc: 'Passed into webhook templates. Pushover requires the application token. ntfy sends Authorization Bearer when set. Unused by Discord, Telegram, and Slack incoming webhooks.'
       - name: exclude
         envvar: EXCLUDE_
         default: []
@@ -989,8 +1095,8 @@ sections:
       - name: template_path
         envvar: TEMPLATE_PATH
         default: ''
-        short: Instead of an internal template, provide your own.
-        desc: Override internal webhook template for discord.com or other hooks.
+        short: Custom Go template file; used when template is automatic.
+        desc: Used when template is empty (automatic). A named template ignores this file.
       - name: template
         envvar: TEMPLATE
         default: ''
@@ -1001,8 +1107,17 @@ sections:
           - value: 'gotify'
           - value: 'pushover'
           - value: 'slack'
-        short: Instead of auto template selection, force a built-in template.
-        desc: 'Override automatic template detection. Values: notifiarr, discord, telegram, gotify, pushover, slack'
+          - value: 'ntfy'
+          - value: 'apprise'
+          - value: 'mattermost'
+        short: Force a built-in template instead of the URL or template file.
+        desc: 'Override automatic template detection. Values: notifiarr, discord, telegram, gotify, pushover, slack, ntfy, apprise, mattermost. Empty uses the URL or template_path.'
+      - name: update
+        envvar: UPDATE
+        default: true
+        recommend: *BOOLEAN
+        short: Edit the previous Discord or Telegram message instead of posting a new one.
+        desc: Default on for Discord webhooks and Telegram sendMessage. Other templates ignore this. Set false to post a new message for every extract event.
       - name: ignore_ssl
         envvar: IGNORE_SSL
         default: false
@@ -1025,6 +1140,18 @@ sections:
           - value: 'application/x-www-form-urlencoded'
         short: Content-Type header sent to webhook.
         desc: If your custom template uses another MIME type, set this.
+      - name: headers
+        envvar: HEADERS_
+        default: {}
+        kind: map
+        omit_compose: true
+        short: Extra HTTP headers sent with the webhook POST.
+        desc: |
+          Nested [webhook.0.headers] table. Header names are letters, digits, underscore, or hyphen.
+          Applied first; Content-Type and ntfy Authorization Bearer from token still win.
+          Notifiarr client key: X-Api-Key. Env: UN_WEBHOOK_0_HEADERS_X-Api-Key=api_key_from_notifiarr_com
+          [webhook.0.headers]
+          X-Api-Key = "api_key_from_notifiarr_com"
 
   cmdhook:
     title: Command Hooks
@@ -1036,6 +1163,7 @@ sections:
     tail: |
       All extraction data is input to the command using environment variables, see example below.
       Extracted files variables names begin with `UN_DATA_FILES_`.
+      Custom IDs from `[hooks].custom_ids` appear as `UN_CUSTOM_ID_<key>`.
       Try `/usr/bin/env` as an example command to see what variables are available.
 
       <details>
@@ -1079,9 +1207,9 @@ sections:
       #####################
       # Executes a script or command when an extraction queues, starts, finishes, and/or is deleted.
       # All data is passed in as environment variables. Try /usr/bin/env to see what variables are available.
-      ###### Don't forget to uncomment [[cmdhook]] at a minimum !!!!
+      ###### Don't forget to uncomment [cmdhook.0] at a minimum !!!!
     envvar_prefix: CMDHOOK_
-    kind: list
+    kind: named
     params:
       - name: command
         envvar: COMMAND

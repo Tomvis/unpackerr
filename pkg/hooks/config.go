@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,9 +20,14 @@ import (
 // Errors produced by this package.
 var (
 	ErrInvalidStatus = errors.New("invalid HTTP status reply")
+	ErrUnknownEvent  = errors.New("unknown extract event")
 	ErrWebhookNoURL  = errors.New("webhook without a URL configured; fix it")
 	ErrCmdhookNoCmd  = errors.New("cmdhook without a command configured; fix it")
 	ErrNilConfig     = errors.New("nil config entry")
+	ErrMessageGone   = errors.New("previous message is gone")
+	ErrHeaderName    = errors.New("webhook header name must be letters, digits, underscore, or hyphen")
+	ErrHeaderValue   = errors.New("webhook header value cannot contain a newline")
+	ErrHeaderDup     = errors.New("duplicate webhook header name")
 )
 
 // Logger is the logging surface hooks need from the daemon.
@@ -30,6 +36,9 @@ type Logger interface {
 	Errorf(msg string, v ...any)
 	Debugf(msg string, v ...any)
 }
+
+// HeaderMap is extra HTTP headers sent with a webhook POST.
+type HeaderMap = map[string]string
 
 // Config defines a webhook or command hook.
 type Config struct {
@@ -48,6 +57,8 @@ type Config struct {
 	Nickname   string        `json:"nickname"     toml:"nickname"      xml:"nickname,omitempty"      yaml:"nickname"`
 	Token      string        `json:"token"        toml:"token"         xml:"token,omitempty"         yaml:"token"`
 	Channel    string        `json:"channel"      toml:"channel"       xml:"channel,omitempty"       yaml:"channel"`
+	Update     *bool         `json:"update"       toml:"update"        xml:"update,omitempty"        yaml:"update"`
+	Headers    HeaderMap     `json:"headers"      toml:"headers"       xml:"headers,omitempty"       yaml:"headers"`
 	client     *http.Client
 	fails      uint
 	posts      uint
@@ -222,6 +233,7 @@ func CloneList(src []*Config) []*Config {
 			URL:       hook.URL,
 			Command:   hook.Command,
 			CType:     hook.CType,
+			Headers:   maps.Clone(hook.Headers),
 			TmplPath:  hook.TmplPath,
 			TempName:  hook.TempName,
 			Timeout:   hook.Timeout,
@@ -233,8 +245,32 @@ func CloneList(src []*Config) []*Config {
 			Nickname:  hook.Nickname,
 			Token:     hook.Token,
 			Channel:   hook.Channel,
+			Update:    cloneBool(hook.Update),
 		}
 	}
 
 	return out
+}
+
+// WantUpdate is true for Discord and Telegram unless the operator set update=false.
+func (w *Config) WantUpdate() bool {
+	if w == nil || !Detect(w.TempName, w.URL, w.TmplPath).CanUpdate {
+		return false
+	}
+
+	if w.Update != nil {
+		return *w.Update
+	}
+
+	return true
+}
+
+func cloneBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+
+	val := *v
+
+	return &val
 }

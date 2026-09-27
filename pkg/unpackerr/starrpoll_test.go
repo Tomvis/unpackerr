@@ -1,6 +1,7 @@
 package unpackerr
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +12,10 @@ import (
 	"golift.io/starr/radarr"
 	"golift.io/starr/readarr"
 	"golift.io/starr/sonarr"
+	"golift.io/xtractr"
 )
+
+var errStarrPollTimeout = errors.New("timeout")
 
 func TestQueueViewsIDs(t *testing.T) {
 	t.Parallel()
@@ -45,11 +49,11 @@ func TestQueueViewsIDs(t *testing.T) {
 		t.Fatalf("readarr bookId: got %v", got)
 	}
 
-	if haveStarrQitem([]*SonarrConfig{son}, "Show") != true {
+	if haveStarrQitem[SonarrConfig, *SonarrConfig](instanceMap([]*SonarrConfig{son}), "Show") != true {
 		t.Fatal("expected haveStarrQitem true for Show")
 	}
 
-	if haveStarrQitem([]*SonarrConfig{son}, "Nope") {
+	if haveStarrQitem[SonarrConfig, *SonarrConfig](instanceMap([]*SonarrConfig{son}), "Nope") {
 		t.Fatal("expected haveStarrQitem false for Nope")
 	}
 }
@@ -70,7 +74,7 @@ func TestCheckStarrQueueLidarrTweak(t *testing.T) {
 	}
 
 	unpack := New()
-	unpack.Lidarr = []*LidarrConfig{{
+	unpack.Lidarr = instanceMap([]*LidarrConfig{{
 		Protocols: defaultProtocol,
 		Paths:     StringSlice{mappedRoot},
 		SplitFlac: true,
@@ -80,7 +84,7 @@ func TestCheckStarrQueueLidarrTweak(t *testing.T) {
 			Protocol:   starr.Protocol("torrent"),
 			OutputPath: outputPath,
 		}}},
-	}}
+	}})
 
 	checkStarrQueue(unpack, unpack.Lidarr, starr.Lidarr, time.Now())
 
@@ -119,7 +123,7 @@ func TestCheckStarrQueueSetsName(t *testing.T) {
 	}
 
 	unpack := New()
-	unpack.Sonarr = []*SonarrConfig{{
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{
 		Name:      "Sportarr",
 		Protocols: defaultProtocol,
 		Paths:     StringSlice{mappedRoot},
@@ -128,7 +132,7 @@ func TestCheckStarrQueueSetsName(t *testing.T) {
 			Status:   "completed",
 			Protocol: starr.Protocol("torrent"),
 		}}},
-	}}
+	}})
 
 	checkStarrQueue(unpack, unpack.Sonarr, starr.Sonarr, time.Now())
 
@@ -149,7 +153,7 @@ func TestCheckStarrQueueSetsName(t *testing.T) {
 		t.Fatalf("Label: got %q want Sportarr", item.Label())
 	}
 
-	unpack.Sonarr[0].Name = "Fightarr"
+	unpack.Sonarr["0"].Name = "Fightarr"
 	checkStarrQueue(unpack, unpack.Sonarr, starr.Sonarr, time.Now())
 
 	if unpack.Map[title].Name != "Fightarr" {
@@ -168,7 +172,7 @@ func TestCheckStarrQueueKeepsForeignName(t *testing.T) {
 		Name: "Movies",
 		URL:  "http://radarr:7878",
 	}
-	unpack.Sonarr = []*SonarrConfig{{
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{
 		Name:      "Sportarr",
 		URL:       "http://sonarr:8989",
 		Protocols: defaultProtocol,
@@ -177,7 +181,7 @@ func TestCheckStarrQueueKeepsForeignName(t *testing.T) {
 			Status:   "downloading",
 			Protocol: starr.Protocol("torrent"),
 		}}},
-	}}
+	}})
 
 	checkStarrQueue(unpack, unpack.Sonarr, starr.Sonarr, time.Now())
 
@@ -196,5 +200,313 @@ func TestStarrConfigLabel(t *testing.T) {
 	cfg := &StarrConfig{Name: "  Sportarr "}
 	if got := cfg.Label(starr.Sonarr); got != "Sportarr" {
 		t.Fatalf("named Label: %q", got)
+	}
+}
+
+func TestTallyQueueViews(t *testing.T) {
+	t.Parallel()
+
+	got := tallyQueueViews([]queueView{
+		{Status: "completed", Protocol: "torrent"},
+		{Status: "Completed", Protocol: "usenet", TrackedStatus: "error"},
+		{Status: "failed"},
+		{Status: "downloading"},
+		{Status: "paused", TrackedState: "downloadFailed"},
+		{Status: "queued"},
+		{Status: "warning"},
+		{Status: "completed", TrackedStatus: "warning"},
+	}, "torrent")
+	if got.complete != 3 || got.match != 1 || got.issues != 5 || got.downloading != 1 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestStarrQueueStatsCountsRecords(t *testing.T) {
+	t.Parallel()
+
+	unpack := New()
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{
+		Name: "Sportarr", Protocols: "torrent", lastQueued: 6, lastRetrieved: 4,
+		Queue: &sonarr.Queue{Records: []*sonarr.QueueRecord{
+			{Status: "completed", Protocol: "torrent"},
+			{Status: "completed", Protocol: "usenet", TrackedDownloadStatus: "error"},
+			{Status: "failed"},
+			{Status: "downloading"},
+			{Status: "warning"},
+		}},
+	}})
+
+	stats := &Stats{}
+	unpack.fillQueueStats(stats)
+
+	got := stats.StarrQueues[0]
+	if got.Queued != 6 || got.Retrieved != 4 || got.Complete != 2 || got.Match != 1 ||
+		got.Issues != 3 || got.Downloading != 1 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestFillQueueStatsConfigCounts(t *testing.T) {
+	t.Parallel()
+
+	unpack := New()
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{}, {}})
+	unpack.Radarr = instanceMap([]*RadarrConfig{{}})
+	unpack.Folders = instanceMap([]*FolderConfig{{Path: "/watch"}, {Path: "/other"}})
+	unpack.Finished = 9
+	unpack.Map["live"] = &Extract{Status: IMPORTED, Updated: time.Now()}
+	unpack.Map["out"] = &Extract{Status: EXTRACTED, Updated: time.Now()}
+
+	stats := &Stats{}
+	unpack.fillQueueStats(stats)
+
+	if stats.Starrs != 3 {
+		t.Fatalf("starrs %d", stats.Starrs)
+	}
+
+	if stats.Folders != 2 {
+		t.Fatalf("folders %d", stats.Folders)
+	}
+
+	unpack.Webhook = instanceMap([]*WebhookConfig{{}})
+
+	stats = &Stats{}
+	unpack.fillQueueStats(stats)
+
+	if stats.Webhooks != 1 || stats.Cmdhooks != 0 {
+		t.Fatalf("hooks configured webhook:%d cmd:%d", stats.Webhooks, stats.Cmdhooks)
+	}
+
+	if stats.Imported != 1 {
+		t.Fatalf("live imported %d", stats.Imported)
+	}
+
+	if stats.Extracted != 1 || stats.Finished != 9 {
+		t.Fatalf("extracted %d finished %d", stats.Extracted, stats.Finished)
+	}
+
+	if len(stats.StarrQueues) != 3 {
+		t.Fatalf("starr queues %d", len(stats.StarrQueues))
+	}
+}
+
+func TestFillStackDepthsSplitsChannels(t *testing.T) {
+	t.Parallel()
+
+	unpack := New()
+	unpack.folders.Events = make(chan *eventData, 8)
+
+	unpack.folders.Updates = make(chan *xtractr.Response, 8)
+	unpack.folders.Events <- &eventData{}
+
+	unpack.folders.Events <- &eventData{}
+
+	unpack.folders.Updates <- &xtractr.Response{}
+
+	unpack.updates <- &xtractr.Response{}
+
+	unpack.delChan <- &fileDeleteReq{}
+
+	unpack.taskChan <- nil
+
+	stats := &Stats{}
+	unpack.fillStackDepths(stats)
+
+	if stats.StackFS != (BufferStat{Len: 2, Cap: 8}) ||
+		stats.StackFolder != (BufferStat{Len: 1, Cap: 8}) ||
+		stats.StackXtractr != (BufferStat{Len: 1, Cap: updateChanBuf}) ||
+		stats.StackDel != (BufferStat{Len: 1, Cap: updateChanBuf}) ||
+		stats.StackTask != (BufferStat{Len: 1, Cap: updateChanBuf}) ||
+		stats.StackHook != (BufferStat{Len: 0, Cap: updateChanBuf}) {
+		t.Fatalf("%+v", stats)
+	}
+
+	if stats.stackTotal() != 6 {
+		t.Fatalf("stack total %d", stats.stackTotal())
+	}
+}
+
+func TestStarrQueueStatsShowsPollCounts(t *testing.T) {
+	t.Parallel()
+
+	unpack := New()
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{}})
+	unpack.Sonarr["0"].Name = "Sportarr"
+	unpack.Sonarr["0"].URL = "http://127.0.0.1:8989"
+	unpack.Sonarr["0"].lastQueued = 12
+	unpack.Sonarr["0"].lastRetrieved = 8
+	unpack.Sonarr["0"].lastPolled = time.Date(2026, 9, 19, 8, 0, 0, 0, time.UTC)
+	unpack.Sonarr["0"].lastPollErr = "timeout"
+
+	stats := &Stats{}
+	unpack.fillQueueStats(stats)
+
+	if len(stats.StarrQueues) != 1 {
+		t.Fatalf("starr queues %d", len(stats.StarrQueues))
+	}
+
+	got := stats.StarrQueues[0]
+	if got.Name != "Sportarr" || got.Queued != 12 || got.Retrieved != 8 || got.Error != "timeout" {
+		t.Fatalf("%+v", got)
+	}
+
+	if !got.UpdatedAt.Equal(unpack.Sonarr["0"].lastPolled) {
+		t.Fatalf("updatedAt %v", got.UpdatedAt)
+	}
+}
+
+func TestPublishStarrPollSetsUpdatedAt(t *testing.T) {
+	t.Parallel()
+
+	unpack := New()
+	cfg := &StarrConfig{}
+	polled := time.Date(2026, 9, 19, 8, 1, 0, 0, time.UTC)
+	bound := false
+
+	unpack.publishStarrPoll(cfg, func() { bound = true }, 4, 3, polled, nil)
+
+	if !bound || cfg.lastQueued != 4 || cfg.lastRetrieved != 3 ||
+		!cfg.lastPolled.Equal(polled) || cfg.lastPollErr != "" || !cfg.polled {
+		t.Fatalf("success: queued=%d retrieved=%d polled=%v err=%q bound=%v",
+			cfg.lastQueued, cfg.lastRetrieved, cfg.lastPolled, cfg.lastPollErr, bound)
+	}
+
+	unpack.publishStarrPoll(cfg, func() { t.Fatal("bind on error") }, 9, 8, polled.Add(time.Minute), errStarrPollTimeout)
+
+	if cfg.lastQueued != 4 || !cfg.lastPolled.Equal(polled) || cfg.lastPollErr != errStarrPollTimeout.Error() {
+		t.Fatalf("error kept snapshot: queued=%d polled=%v err=%q",
+			cfg.lastQueued, cfg.lastPolled, cfg.lastPollErr)
+	}
+}
+
+func TestCheckQueueChangesSkipsUnpolledSnapshot(t *testing.T) {
+	t.Parallel()
+
+	const url = "http://sonarr:8989"
+
+	unpack := New()
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{}})
+	unpack.Sonarr["0"].URL = url
+
+	item := &Extract{
+		App: starr.Sonarr, URL: url, Path: "/dl/show",
+		Status: EXTRACTED, Updated: time.Now().Add(-time.Hour),
+		Resp:        &xtractr.Response{NewFiles: []string{"/dl/show/ep.mkv"}},
+		DeleteDelay: 5 * time.Minute,
+	}
+	item.XProg = &ExtractProgress{Extract: item}
+	unpack.Map["show"] = item
+
+	unpack.checkQueueChanges(time.Now())
+
+	if got := unpack.Map["show"]; got == nil || got.Status != EXTRACTED {
+		t.Fatalf("unpolled import %+v", got)
+	}
+
+	unpack.Sonarr["0"].Queue = &sonarr.Queue{}
+	unpack.Sonarr["0"].polled = true
+	unpack.checkQueueChanges(time.Now())
+
+	if got := unpack.Map["show"]; got == nil || got.Status != IMPORTED {
+		t.Fatalf("polled empty queue %+v", got)
+	}
+}
+
+func TestCheckQueueChangesKeepsExtractedWhenStillQueued(t *testing.T) {
+	t.Parallel()
+
+	const url = "http://sonarr:8989"
+
+	unpack := New()
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{}})
+	unpack.Sonarr["0"].URL = url
+	unpack.Sonarr["0"].Queue = &sonarr.Queue{Records: []*sonarr.QueueRecord{{Title: "show"}}}
+
+	item := &Extract{
+		App: starr.Sonarr, URL: url, Path: "/dl/show",
+		Status: EXTRACTED, Updated: time.Now().Add(-time.Hour),
+	}
+	item.XProg = &ExtractProgress{Extract: item}
+	unpack.Map["show"] = item
+
+	unpack.checkQueueChanges(time.Now())
+
+	if got := unpack.Map["show"]; got == nil || got.Status != EXTRACTED {
+		t.Fatalf("still queued %+v", got)
+	}
+}
+
+func importedTestItem(url string) *Extract {
+	item := &Extract{
+		App: starr.Sonarr, URL: url, Path: "/dl/show",
+		Status: IMPORTED, Updated: time.Now().Add(-time.Hour),
+		Resp:        &xtractr.Response{NewFiles: []string{"/dl/show/ep.mkv"}},
+		DeleteDelay: time.Minute,
+	}
+	item.XProg = &ExtractProgress{Extract: item}
+
+	return item
+}
+
+func TestCheckQueueChangesResetsImportedWhenStillQueued(t *testing.T) {
+	t.Parallel()
+
+	const url = "http://sonarr:8989"
+
+	unpack := New()
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{}})
+	unpack.Sonarr["0"].URL = url
+	unpack.Sonarr["0"].polled = true
+	unpack.Sonarr["0"].Queue = &sonarr.Queue{Records: []*sonarr.QueueRecord{{Title: "show"}}}
+	unpack.Map["show"] = importedTestItem(url)
+
+	unpack.checkQueueChanges(time.Now())
+
+	if got := unpack.Map["show"]; got == nil || got.Status != EXTRACTED {
+		t.Fatalf("imported still queued %+v", got)
+	}
+}
+
+func TestCheckExtractDoneSkipsImportedStillQueued(t *testing.T) {
+	t.Parallel()
+
+	const url = "http://sonarr:8989"
+
+	unpack := New()
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{}})
+	unpack.Sonarr["0"].URL = url
+	unpack.Sonarr["0"].polled = true
+	unpack.Sonarr["0"].Queue = &sonarr.Queue{Records: []*sonarr.QueueRecord{{Title: "show"}}}
+	unpack.Map["show"] = importedTestItem(url)
+
+	unpack.checkExtractDone(time.Now())
+
+	if got := unpack.Map["show"]; got == nil || got.Status != IMPORTED {
+		t.Fatalf("deleted while still queued %+v", got)
+	}
+}
+
+func TestCheckExtractDoneSkipsImportedUntilPolled(t *testing.T) {
+	t.Parallel()
+
+	const url = "http://sonarr:8989"
+
+	unpack := New()
+	unpack.Sonarr = instanceMap([]*SonarrConfig{{}})
+	unpack.Sonarr["0"].URL = url
+	unpack.Map["show"] = importedTestItem(url)
+
+	unpack.checkExtractDone(time.Now())
+
+	if got := unpack.Map["show"]; got == nil || got.Status != IMPORTED {
+		t.Fatalf("deleted before poll %+v", got)
+	}
+
+	unpack.Sonarr["0"].polled = true
+	unpack.Sonarr["0"].Queue = &sonarr.Queue{}
+	unpack.checkExtractDone(time.Now())
+
+	if got := unpack.Map["show"]; got == nil || got.Status != DELETED {
+		t.Fatalf("should delete after empty poll %+v", got)
 	}
 }

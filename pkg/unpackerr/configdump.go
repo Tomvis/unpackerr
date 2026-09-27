@@ -41,7 +41,6 @@ func (u *Unpackerr) liveConfigText(info authInfo) string {
 		fmt.Fprintf(&buf, format+"\n", v...)
 	}
 
-	printf("==> %s <==", helpLink)
 	printf("==> Live Settings <==")
 	printf(" => Version: v%s-%s (%s/%s)", version.Version, version.Revision, runtime.GOOS, runtime.GOARCH)
 
@@ -60,23 +59,27 @@ func (u *Unpackerr) liveConfigText(info authInfo) string {
 // It does not mutate config; callers that need a normalized URL base do that first.
 func (u *Unpackerr) writeRunningConfig(printf configLine, auth dumpAuth) {
 	if !auth.omit(printf, SectionSonarr, "Sonarr Config") {
-		logStarr(printf, starr.Sonarr, u.Sonarr)
+		logStarr[SonarrConfig, *SonarrConfig](printf, starr.Sonarr, u.Sonarr)
 	}
 
 	if !auth.omit(printf, SectionRadarr, "Radarr Config") {
-		logStarr(printf, starr.Radarr, u.Radarr)
+		logStarr[RadarrConfig, *RadarrConfig](printf, starr.Radarr, u.Radarr)
 	}
 
 	if !auth.omit(printf, SectionLidarr, "Lidarr Config") {
-		logStarr(printf, starr.Lidarr, u.Lidarr)
+		logStarr[LidarrConfig, *LidarrConfig](printf, starr.Lidarr, u.Lidarr)
 	}
 
 	if !auth.omit(printf, SectionReadarr, "Readarr Config") {
-		logStarr(printf, starr.Readarr, u.Readarr)
+		logStarr[ReadarrConfig, *ReadarrConfig](printf, starr.Readarr, u.Readarr)
 	}
 
 	if !auth.omit(printf, SectionFolders, "Folder Config") {
 		u.logFolders(printf)
+	}
+
+	if !auth.omit(printf, SectionHooks, "Hook Payload") {
+		u.logHookPayload(printf)
 	}
 
 	if !auth.omit(printf, SectionGeneral, "General Config") {
@@ -121,29 +124,33 @@ func (u *Unpackerr) logGeneral(printf configLine) {
 	}
 }
 
-func logStarr[T any, P starrApp[T]](printf configLine, app starr.App, list []P) {
-	count := len(list)
+func logStarr[T any, P starrApp[T]](printf configLine, app starr.App, list InstanceMap[T]) {
+	items := instanceValues(list)
+
+	count := len(items)
 	if count == 1 {
-		item := list[0]
-		c := item.conf()
+		item := items[0]
+		server := asStarr[T, P](item)
+		c := server.conf()
 		printf(" => %s Config: 1 server: %s"+starrLogLine+"%s",
 			app, starrNamePrefix(c.Name), c.URL, c.APIKey != "", c.Timeout.String(),
 			c.ValidSSL, c.Protocols, c.Syncthing,
 			c.DeleteOrig, c.DeleteDelay.String(),
-			logMaxBytes(c.MaxBytes, defaultAppMaxBytes(app)), c.Paths, item.logExtra())
+			logMaxBytes(c.MaxBytes, defaultAppMaxBytes(app)), c.Paths, server.logExtra())
 
 		return
 	}
 
 	printf(" => %s Config: %d servers", app, count)
 
-	for _, item := range list {
-		c := item.conf()
+	for _, item := range items {
+		server := asStarr[T, P](item)
+		c := server.conf()
 		printf(starrLogPfx+"%s"+starrLogLine+"%s",
 			starrNamePrefix(c.Name),
 			c.URL, c.APIKey != "", c.Timeout.String(), c.ValidSSL, c.Protocols,
 			c.Syncthing, c.DeleteOrig, c.DeleteDelay.String(),
-			logMaxBytes(c.MaxBytes, defaultAppMaxBytes(app)), c.Paths, item.logExtra())
+			logMaxBytes(c.MaxBytes, defaultAppMaxBytes(app)), c.Paths, server.logExtra())
 	}
 }
 
@@ -165,48 +172,56 @@ func logMaxBytes(configured, fallback string) string {
 }
 
 func (u *Unpackerr) logFolders(printf configLine) {
-	if epath, count := "", len(u.Folders); count == 1 {
-		folder := u.Folders[0]
+	folders := instanceValues(u.Folders)
+	if epath, count := "", len(folders); count == 1 {
+		folder := folders[0]
 		if folder.ExtractPath != "" {
 			epath = ", extract to: " + folder.ExtractPath
 		}
 
 		printf(" => Folder Config: 1 path: %s%s; delete_after:%v delete_orig:%v delete_files:%v "+
-			"log_file:%v move_back:%v isos:%v max_bytes:%s files:%d ratio:%g nested:%d extras_depth:%d "+
-			"symlinks:%v event_buffer:%d",
+			"log_file:%v move_back:%v isos:%v skip_empty:%v wait_ext:%v max_bytes:%s files:%d ratio:%g "+
+			"nested:%d extras_depth:%d symlinks:%v poll:%v event_buffer:%d",
 			folder.Path, epath, folder.DeleteAfter, folder.DeleteOrig, folder.DeleteFiles,
-			!folder.DisableLog, folder.MoveBack, folder.ExtractISOs,
+			!folder.DisableLog, folder.MoveBack, folder.ExtractISOs, folder.SkipEmpty, folder.WaitExtensions,
 			logMaxBytes(folder.MaxBytes, "uncapped"), folder.MaxFiles, folder.MaxRatio,
-			folder.MaxNested, folder.ExtrasMaxDepth, folder.AllowSymlinks, u.Folder.Buffer)
+			folder.MaxNested, folder.ExtrasMaxDepth, folder.AllowSymlinks, folder.Interval, u.Folder.Buffer)
 	} else {
 		printf(" => Folder Config: %d paths, event_buffer:%d ", count, u.Folder.Buffer)
 
-		for _, folder := range u.Folders {
+		for _, folder := range folders {
 			if epath = ""; folder.ExtractPath != "" {
 				epath = " extract to: " + folder.ExtractPath
 			}
 
 			printf(" =>    Path: %s%s; delete_after:%v delete_orig:%v delete_files:%v log_file:%v "+
-				"move_back:%v isos:%v max_bytes:%s files:%d ratio:%g nested:%d extras_depth:%d symlinks:%v",
+				"move_back:%v isos:%v skip_empty:%v wait_ext:%v max_bytes:%s files:%d ratio:%g "+
+				"nested:%d extras_depth:%d symlinks:%v poll:%v",
 				folder.Path, epath, folder.DeleteAfter, folder.DeleteOrig, folder.DeleteFiles,
-				!folder.DisableLog, folder.MoveBack, folder.ExtractISOs,
+				!folder.DisableLog, folder.MoveBack, folder.ExtractISOs, folder.SkipEmpty, folder.WaitExtensions,
 				logMaxBytes(folder.MaxBytes, "uncapped"), folder.MaxFiles, folder.MaxRatio,
-				folder.MaxNested, folder.ExtrasMaxDepth, folder.AllowSymlinks)
+				folder.MaxNested, folder.ExtrasMaxDepth, folder.AllowSymlinks, folder.Interval)
 		}
 	}
+}
+
+func (u *Unpackerr) logHookPayload(printf configLine) {
+	printf(" => Hook Payload: %d extra ids, %d custom titles",
+		len(u.Hooks.CustomIDs), u.Hooks.Titles.nonEmpty())
 }
 
 func (u *Unpackerr) logWebhook(printf configLine) {
 	var vars, prefix string
 
-	if len(u.Webhook) == 1 {
+	list := instanceValues(u.Webhook)
+	if len(list) == 1 {
 		prefix = " => Webhook Config: 1 URL"
 	} else {
-		printf(" => Webhook Configs: %d URLs", len(u.Webhook))
+		printf(" => Webhook Configs: %d URLs", len(list))
 		prefix = " =>    URL" //nolint:wsl_v5
 	}
 
-	for _, hook := range u.Webhook {
+	for _, hook := range list {
 		if vars = ""; hook.TmplPath != "" {
 			vars = ", template: " + hook.TmplPath + ", content_type: " + hook.CType
 		}
@@ -231,14 +246,15 @@ func (u *Unpackerr) logWebhook(printf configLine) {
 func (u *Unpackerr) logCmdhook(printf configLine) {
 	var prefix string
 
-	if len(u.Cmdhook) == 1 {
+	cmds := instanceValues(u.Cmdhook)
+	if len(cmds) == 1 {
 		prefix = " => Command Hook Config: 1 cmd"
 	} else {
-		printf(" => Command Hook Configs: %d commands", len(u.Cmdhook))
+		printf(" => Command Hook Configs: %d commands", len(cmds))
 		prefix = " =>    Command" //nolint:wsl_v5
 	}
 
-	for _, hook := range u.Cmdhook {
+	for _, hook := range cmds {
 		printf("%s: %s, timeout: %v, silent: %v, events: %v, shell: %v, cmd: %s",
 			prefix, hook.Name, hook.Timeout, hook.Silent, hooks.LogEvents(hook.Events), hook.Shell, hook.Command)
 	}

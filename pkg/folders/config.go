@@ -12,11 +12,11 @@ import (
 	"golift.io/xtractr"
 )
 
-// defaultPollInterval is used if Docker is detected.
 const (
-	DefaultPollInterval = time.Second
 	MinimumPollInterval = 5 * time.Millisecond
 	DefaultDeleteAfter  = 10 * time.Minute
+	KindPolling         = "polling"
+	KindFSNotify        = "fsnotify"
 )
 
 // FolderConfig defines the input data for a watched folder.
@@ -38,27 +38,40 @@ type FolderConfig struct {
 	MaxFiles         int            `json:"maxFiles"         toml:"max_files"         xml:"max_files"         yaml:"maxFiles"`
 	MaxRatio         float64        `json:"maxRatio"         toml:"max_ratio"         xml:"max_ratio"         yaml:"maxRatio"`
 	// ResolvedMaxBytes is 0 when unset: folder watcher is uncapped.
-	ResolvedMaxBytes uint64   `json:"-"             toml:"-"             xml:"-"            yaml:"-"`
-	ExcludePaths     []string `json:"exclude_paths" toml:"exclude_paths" xml:"exclude_path" yaml:"exclude_paths"`
-	Path             string   `json:"path"          toml:"path"          xml:"path"         yaml:"path"`
+	ResolvedMaxBytes uint64        `json:"-"               toml:"-"               xml:"-"              yaml:"-"`
+	ExcludePaths     []string      `json:"exclude_paths"   toml:"exclude_paths"   xml:"exclude_path"   yaml:"exclude_paths"`
+	Interval         cnfg.Duration `json:"interval"        toml:"interval"        xml:"interval"       yaml:"interval"`
+	WaitExtensions   []string      `json:"wait_extensions" toml:"wait_extensions" xml:"wait_extension" yaml:"wait_extensions"`
+	SkipEmpty        bool          `json:"skip_empty"      toml:"skip_empty"      xml:"skip_empty"     yaml:"skip_empty"`
+	Path             string        `json:"path"            toml:"path"            xml:"path"           yaml:"path"`
 }
 
-// WatchConfig is the undocumented folders buffer/interval settings.
+// UsesPoller is true when this folder has its own radovskyb poller.
+func (c *FolderConfig) UsesPoller() bool {
+	return c != nil && c.Interval.Duration >= MinimumPollInterval
+}
+
+// WatchConfig is the undocumented folders event-buffer setting.
 type WatchConfig struct {
-	Buffer   uint          `json:"buffer"   toml:"buffer"   xml:"buffer"   yaml:"buffer"`
-	Interval cnfg.Duration `json:"interval" toml:"interval" xml:"interval" yaml:"interval"`
+	Buffer uint `json:"buffer" toml:"buffer" xml:"buffer" yaml:"buffer"`
+}
+
+// folderPoller is one radovskyb watcher for a single watch path.
+type folderPoller struct {
+	path     string
+	interval time.Duration
+	watcher  *watcher.Watcher
 }
 
 // Folders holds all known (created) folders in all watch paths.
 type Folders struct {
 	Logs
-	Interval     time.Duration
 	Config       []*FolderConfig
 	Folders      map[string]*Folder
 	Events       chan *Event
 	Updates      chan *xtractr.Response
 	FSNotify     *fsnotify.Watcher
-	Watcher      *watcher.Watcher
+	pollers      []*folderPoller
 	IgnoreSuffix string
 }
 
@@ -69,13 +82,23 @@ type Logs interface {
 	Debugf(msg string, v ...any)
 }
 
-// Folder is a "new" watched folder.
+// Folder is a tracked archive or directory inside a watch path.
 type Folder struct {
-	Updated  time.Time
-	Status   extract.Status
-	Config   *FolderConfig
-	Files    []string
-	Retries  uint
+	// Updated is last write or status change. Start delay, retry delay,
+	// delete after, and the wait-extension ReadDir skip all use this.
+	Updated time.Time
+	// WaitFile is a top-level name matching wait_extensions (.part, etc).
+	// Empty means extraction is not blocked on an incomplete download.
+	WaitFile string
+	// Status is the extract lifecycle for this item.
+	Status extract.Status
+	// Config is the watch-root settings this item belongs to.
+	Config *FolderConfig
+	// Files are extracted output paths (xtractr NewFiles). Used with delete_files.
+	Files []string
+	// Retries is how many times a failed extract has been started again.
+	Retries uint
+	// Archives are the input archives xtractr found. Used with delete_original.
 	Archives xtractr.ArchiveList
 	// PreFiles is the snapshot of each archive dest before extraction
 	// (MoveBack only). Dest folders come from FindCompressedFiles so nested
@@ -92,4 +115,18 @@ type Event struct {
 	Name   string
 	File   string
 	Op     string
+}
+
+// Kind is "polling" or "fsnotify" from the event prefix (w vs f).
+func (e *Event) Kind() string {
+	switch {
+	default:
+		fallthrough
+	case e == nil || e.Op == "":
+		return ""
+	case e.Op[0] == 'w':
+		return KindPolling
+	case e.Op[0] == 'f':
+		return KindFSNotify
+	}
 }

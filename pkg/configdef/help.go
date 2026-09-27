@@ -20,6 +20,8 @@ func uiSectionName(name section) string {
 		return "starr"
 	case "folders", "folder":
 		return "folders"
+	case "hooks":
+		return "payload"
 	case "webhook":
 		return "webhook"
 	case "cmdhook":
@@ -124,7 +126,7 @@ func (h *Header) exampleEnv(prefix string, param *Param) string {
 	}
 
 	hSuffix := ""
-	if h.Kind == list {
+	if h.repeatable() {
 		hSuffix = "0_"
 	}
 

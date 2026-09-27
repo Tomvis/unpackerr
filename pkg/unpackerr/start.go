@@ -46,8 +46,7 @@ const (
 	minimumDeleteDelay     = time.Second
 	defaultDeleteDelay     = 5 * time.Minute
 	staleItemTimeout       = 24 * time.Hour // Safety net: items stuck at intermediate states are cleaned up.
-	defaultHistory         = 200            // JSONL cap; tray still shows trayHistory names.
-	trayHistory            = 10             // items kept in the GUI history menu.
+	defaultHistory         = 400            // JSONL cap for unpackerr.history.jsonl and the history API.
 	suffix                 = "_unpackerred" // suffix for unpacked folders.
 	updateChanBuf          = 100            // Size of xtractr callback update channels.
 	signalBuf              = 4              // Hold HUP/TERM until waitForExit starts.
@@ -67,22 +66,30 @@ type Unpackerr struct {
 	*Config
 	*History
 	*xtractr.Xtractr
-	metrics    *metrics
-	folders    *Folders
-	sigChan    chan os.Signal
-	updates    chan *xtractr.Response
-	progChan   chan *ExtractProgress
-	hookWorker *hooks.Worker
-	delChan    chan *fileDeleteReq
-	taskChan   chan *mainTask // HTTP hands config applies and queue actions to Run().
-	workChan   chan []func()
+	metrics      *metrics
+	folders      *Folders
+	sigChan      chan os.Signal
+	updates      chan *xtractr.Response
+	progChan     chan *ExtractProgress
+	hookWorker   *hooks.Worker
+	pendingHooks []pendingHook // filled under History.mu; flushed in unlockHistory.
+	hookFails    []string      // item IDs from the hook worker; drained in Run().
+	hookFailWake chan struct{} // coalesced wake so Done never blocks on a full hook queue.
+	hookFailMu   sync.Mutex
+	hookMsgs     map[string]*hookMsgCache // worker-visible ids; keyed itemID, owned by live extract.
+	hookMsgSaves []hookMsgSave            // persist queue; drained in Run().
+	hookMsgWake  chan struct{}            // coalesced wake; SaveID must not block on Enqueue.
+	hookMsgMu    sync.Mutex
+	delChan      chan *fileDeleteReq
+	taskChan     chan *mainTask // HTTP hands config applies and queue actions to Run().
+	workChan     chan []func()
 	*Logger
 	rotatorr *rotatorr.Logger
 	httpLog  *rotatorr.Logger
 	menu     map[string]ui.MenuItem
 	// Live Config is owned by the main goroutine in Run(). fileConfig is the
 	// on-disk shape (filepath: values kept) and is also written by the tray,
-	// so it and the hook slices that /api/stats counts sit under configMu.
+	// so it and the hook/Starr/folder slices that /api/stats counts sit under configMu.
 	fileConfig       *Config
 	envUsed          map[string]string // UN_* suffixes that ParseENV wrote; immutable after startup
 	livePasswords    StringSlice       // post-env, pre-expansion; GET /live uses this
@@ -92,17 +99,19 @@ type Unpackerr struct {
 	inFlight         atomic.Int64 // queued-or-running delete and hook work.
 	workThreads      int
 	hookOnce         sync.Once
-	uiPassMu         sync.RWMutex // live webserver auth: UIPassword, APIKeys, Roles, keyPerms, Upstreams, allow
+	uiPassMu         sync.RWMutex // live UIPassword, UIRoleHeader, APIKeys, Roles, keyPerms, Upstreams, WSOrigins, allow
 	uiPasswordNotice string
 	uiPasswordGenErr error
 	configWriteErr   error
-	whisparrAdopted  bool // folded [[whisparr]] before logging; warn after setupLogging
 	adminKeyNotice   string
 	adminKeyErr      error
 	histPath         string
 	histMu           sync.Mutex // records and the JSONL file; HTTP reads, main loop appends.
 	histLines        int        // lines in the file since the last compaction.
 	records          []HistoryRecord
+	hub              *liveHub
+	appLogTee        *logTee
+	httpLogTee       *logTee
 }
 
 type fileDeleteReq struct {
@@ -115,10 +124,11 @@ type fileDeleteReq struct {
 
 // Logger provides a struct we can pass into other packages.
 type Logger struct {
-	HTTP  *log.Logger
-	Info  *log.Logger
-	Error *log.Logger
-	Debug *log.Logger
+	HTTP    *log.Logger
+	Info    *log.Logger
+	Error   *log.Logger
+	Debug   *log.Logger
+	onError func(string)
 }
 
 // Flags are our CLI input flags.
@@ -133,18 +143,21 @@ type Flags struct {
 // New returns an UnpackerPoller struct full of defaults.
 // An empty struct will surely cause you pain, so use this!
 func New() *Unpackerr {
-	return &Unpackerr{
-		Flags:      &Flags{EnvPrefix: "UN"},
-		hookWorker: hooks.NewWorker(updateChanBuf),
-		delChan:    make(chan *fileDeleteReq, updateChanBuf),
-		taskChan:   make(chan *mainTask, updateChanBuf),
-		sigChan:    make(chan os.Signal, signalBuf),
-		workChan:   make(chan []func(), 1),
-		History:    &History{Map: make(map[string]*Extract), forgotten: make(map[string]struct{})},
-		folders:    &Folders{Folders: make(map[string]*Folder)}, // replaced by PollFolders when folders are configured.
-		updates:    make(chan *xtractr.Response, updateChanBuf),
-		progChan:   make(chan *ExtractProgress),
-		menu:       make(map[string]ui.MenuItem),
+	unpackerr := &Unpackerr{
+		Flags:        &Flags{EnvPrefix: "UN"},
+		hookWorker:   hooks.NewWorker(updateChanBuf),
+		hookFailWake: make(chan struct{}, 1),
+		hookMsgWake:  make(chan struct{}, 1),
+		delChan:      make(chan *fileDeleteReq, updateChanBuf),
+		taskChan:     make(chan *mainTask, updateChanBuf),
+		sigChan:      make(chan os.Signal, signalBuf),
+		workChan:     make(chan []func(), 1),
+		History:      &History{Map: make(map[string]*Extract), forgotten: make(map[string]struct{})},
+		folders:      &Folders{Folders: make(map[string]*Folder)}, // replaced by PollFolders when folders are configured.
+		updates:      make(chan *xtractr.Response, updateChanBuf),
+		progChan:     make(chan *ExtractProgress),
+		menu:         make(map[string]ui.MenuItem),
+		hub:          newLiveHub(),
 		Config: &Config{
 			KeepHistory:   defaultHistory,
 			LogQueues:     cnfg.Duration{Duration: time.Minute + time.Second},
@@ -171,6 +184,11 @@ func New() *Unpackerr {
 			Debug: log.New(io.Discard, "[DEBUG] ", log.Lshortfile|log.Lmicroseconds|log.Ldate),
 		},
 	}
+
+	unpackerr.hub.statsFn = unpackerr.stats
+	unpackerr.onError = unpackerr.hub.notifyError
+
+	return unpackerr
 }
 
 // Start runs the app.
@@ -201,7 +219,6 @@ func Start() error {
 		version.Version, version.Revision, os.Getpid(),
 		os.Getuid(), os.Getgid(), getUmask(), version.Started.Round(time.Second))
 	unpackerr.Debugf("%s", strings.Join(strings.Fields(strings.ReplaceAll(version.Print("unpackerr"), "\n", ", ")), " "))
-	unpackerr.warnAdoptedWhisparr()
 
 	if err := unpackerr.handleStartupPassword(); err != nil {
 		return err
@@ -226,6 +243,8 @@ func Start() error {
 		return err
 	}
 
+	unpackerr.restoreQueueFromHistory()
+
 	unpackerr.logStartupInfo(msg, output)
 
 	if unpackerr.webhook > 0 {
@@ -243,6 +262,7 @@ func Start() error {
 	unpackerr.ensureHookWorker()
 
 	go unpackerr.watchDeleteChannel()
+	go unpackerr.hub.run()
 
 	unpackerr.startWebServer()
 	unpackerr.watchWorkThread()
@@ -387,7 +407,29 @@ func (u *Unpackerr) ensureHookWorker() {
 }
 
 // queueHook publishes a hook and counts it in flight. See queueDelete.
-func (u *Unpackerr) queueHook(item *hooks.Item) {
+// itemID is the Map/history key (Starr title or folder path), not Payload.Path.
+// slug is the webhook/cmdhook InstanceMap key stored in HookMessages.
+func (u *Unpackerr) queueHook(itemID, slug string, live *Extract, item *hooks.Item) {
+	if item == nil {
+		return
+	}
+
+	item.Done = func(err error) {
+		if err != nil {
+			u.reportHookFail(itemID)
+		}
+	}
+
+	if slug != "" {
+		item.LookupID = func() string {
+			return u.lookupHookMessage(itemID, slug, live)
+		}
+
+		item.SaveID = func(msgID string) {
+			u.storeHookMessage(itemID, slug, msgID, live)
+		}
+	}
+
 	u.inFlight.Add(1)
 
 	u.hookWorker.Enqueue(item)
@@ -446,7 +488,9 @@ func (u *Unpackerr) Run() {
 	}
 
 	u.PollFolders()          // This initializes channel(s) used below.
+	u.seedFolderTracker()    // PollFolders replaced the tracker; attach restored Folder rows.
 	u.retrieveAppQueues(now) // Get in-app queues on startup.
+	u.checkQueueChanges(now) // Same pairing as the poller tick; restored IMPORTED may still be queued.
 
 	// This is the "main go routine" in start.go.
 	for {
@@ -476,6 +520,12 @@ func (u *Unpackerr) Run() {
 		case task := <-u.taskChan:
 			// HTTP config PUT and queue retry/forget mutate live state on this goroutine.
 			task.result <- task.fn()
+		case <-u.hookFailWake:
+			// Hook worker completions; recordHookFail reads live KeepHistory.
+			u.drainHookFails()
+		case <-u.hookMsgWake:
+			// Hook worker message ids; saveHookMessage mutates Map on this goroutine.
+			u.drainHookMessages()
 		case now := <-u.tickers.logger.C:
 			// Log/print current queue counts once in a while, when something is configured.
 			if u.starrAppCount()+len(u.Folders) > 0 {
