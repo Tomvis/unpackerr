@@ -21,10 +21,10 @@ require (
 	golang.org/x/sys v0.48.0
 	golift.io/cnfg v0.4.1-0.20260913183411-6fc2ae31e285
 	golift.io/cnfgfile v0.0.0-20240713024420-a5436d84eb48
-	golift.io/rotatorr v0.0.0-20260908070935-a77ea24793b3
+	golift.io/rotatorr v0.0.0-20260923043249-ca6f760fa562
 	golift.io/starr v1.4.1
 	golift.io/version v0.0.2
-	golift.io/xtractr v0.6.2-0.20260922231041-fec876ff1836
+	golift.io/xtractr v0.7.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -71,6 +71,7 @@ require (
 	golang.org/x/image v0.46.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
+	golift.io/ape v0.2.0 // indirect
 	golift.io/asar v0.0.0-20260922041046-6f7004983a76 // indirect
 	golift.io/udf v0.1.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
