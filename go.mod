@@ -71,6 +71,7 @@ require (
 	golang.org/x/image v0.46.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
+	golift.io/asar v0.0.0-20260922041046-6f7004983a76 // indirect
 	golift.io/udf v0.1.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
