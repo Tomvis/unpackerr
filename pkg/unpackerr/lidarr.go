@@ -259,6 +259,12 @@ func (u *Unpackerr) importSplitFlacTracks(item *Extract, server *LidarrConfig) {
 		return
 	}
 
+	// Fork (MUSIC-101): skip files Lidarr matched to no track.
+	outputs, dropped := dropTracklessOutputs(outputs)
+	if len(dropped) > 0 {
+		u.Printf("[Lidarr] Skipping %d file(s) Lidarr matched to no track: %v (folder: %s)", len(dropped), dropped, item.Path)
+	}
+
 	cmd := lidarr.ManualImportCommandFromOutputs(outputs, true)
 	if cmd == nil {
 		u.Printf("[Lidarr] No importable files for manual import: %s", item.Path)
