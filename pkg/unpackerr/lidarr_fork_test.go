@@ -59,3 +59,23 @@ func TestDropTracklessOutputs(t *testing.T) {
 		t.Errorf("dropped %v", dropped)
 	}
 }
+
+// Fork (MUSIC-103): a held-edition download waits for the edition judge. ManualImport skips Lidarr's
+// import specs, so the split import must not send it (it imported Кино and Atoma with no judge).
+func TestHeldEditionRejection(t *testing.T) {
+	t.Parallel()
+
+	plain := &lidarr.ManualImportOutput{Path: "/d/01.flac", Rejections: []*lidarr.Rejection{{Reason: "Has missing tracks"}}}
+	held := &lidarr.ManualImportOutput{
+		Path:       "/d/CD2/01.flac",
+		Rejections: []*lidarr.Rejection{{Reason: "Grabbed for a held edition: awaiting edition judge", Type: "permanent"}},
+	}
+
+	if reason := heldEditionRejection([]*lidarr.ManualImportOutput{plain, nil}); reason != "" {
+		t.Errorf("no held rejection: got %q", reason)
+	}
+
+	if reason := heldEditionRejection([]*lidarr.ManualImportOutput{plain, held}); reason != held.Rejections[0].Reason {
+		t.Errorf("held rejection: got %q", reason)
+	}
+}

@@ -253,6 +253,12 @@ func (u *Unpackerr) importSplitFlacTracks(item *Extract, server *LidarrConfig) {
 		return
 	}
 
+	// Fork (MUSIC-103): leave a held-edition download in the queue for the edition judge.
+	if reason := heldEditionRejection(outputs); reason != "" {
+		u.Printf("[Lidarr] Not importing split tracks, left for the edition judge (%s): %s", reason, item.Path)
+		return
+	}
+
 	outputs = u.filterSplitOutputs(outputs, item)
 	if len(outputs) == 0 {
 		u.Printf("[Lidarr] No split track files to import (folder: %s)", item.Path)
