@@ -160,7 +160,7 @@ func New() *Unpackerr {
 		hub:          newLiveHub(),
 		Config: &Config{
 			KeepHistory:   defaultHistory,
-			LogQueues:     cnfg.Duration{Duration: time.Minute + time.Second},
+			LogQueues:     cnfg.Duration{Duration: time.Minute},
 			MaxRetries:    defaultMaxRetries,
 			RemnantAction: remnantAction(""),
 			LogFiles:      defaultLogFiles,
@@ -237,6 +237,11 @@ func Start() error {
 	})
 	if err != nil {
 		return fmt.Errorf("parsing filepaths: %w", err)
+	}
+
+	// Resolve filepath: secrets before validating webserver API keys, as for Starr API keys.
+	if err := unpackerr.Webserver.validateAuth(); err != nil {
+		return err
 	}
 
 	if err := unpackerr.validateApps(); err != nil {

@@ -259,6 +259,122 @@ func TestUnmarshalConfigDoesNotPersistEnvSecrets(t *testing.T) {
 	}
 }
 
+// Indexed UN_SONARR_0_PATHS_0 fills the download list.
+func TestUnmarshalIndexedStarrPaths(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "unpackerr.conf")
+	body := "[webserver]\nlisten_addr = \"127.0.0.1:0\"\nui_password = \"\"\n" +
+		"[sonarr.0]\nurl = \"http://sonarr:8989\"\napi_key = \"" + strings.Repeat("a", 32) + "\"\n"
+
+	if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("UN_SONARR_0_PATHS_0", "/from/env")
+
+	unpack := New()
+	unpack.ConfigFile = conf
+
+	if _, _, _, err := unpack.unmarshalConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := unpack.Sonarr["0"]
+	if got == nil || len(got.Paths) != 1 || got.Paths[0] != "/from/env" {
+		t.Fatalf("live paths %+v", got)
+	}
+
+	file := unpack.fileConfig.Sonarr["0"]
+	if file == nil || len(file.Paths) != 0 {
+		t.Fatalf("file snapshot %+v", file)
+	}
+
+	if unpack.envUsed["SONARR_0_PATHS_0"] == "" {
+		t.Fatalf("env used %+v", unpack.envUsed)
+	}
+}
+
+// An empty PATHS_0 used to be ignored. A blank entry must not block the default path.
+func TestEmptyIndexedStarrPathUsesDefault(t *testing.T) {
+	t.Parallel()
+
+	unpack := New()
+	conf := &StarrConfig{Paths: []string{"", "  "}}
+	conf.URL = "http://sonarr:8989"
+	conf.APIKey = strings.Repeat("a", 32)
+
+	if err := unpack.validateApp(conf, starr.Sonarr, "0"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(conf.Paths) != 1 || conf.Paths[0] != defaultSavePath {
+		t.Fatalf("paths %+v", conf.Paths)
+	}
+}
+
+// UN_SONARR_0_PATHS=/a,/b is the pre-index form, still accepted when PATHS_0 is unset.
+func TestUnmarshalCommaStarrPaths(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "unpackerr.conf")
+	body := "[webserver]\nlisten_addr = \"127.0.0.1:0\"\nui_password = \"\"\n" +
+		"[sonarr.0]\nurl = \"http://sonarr:8989\"\napi_key = \"" + strings.Repeat("a", 32) + "\"\n" +
+		"paths = [\"/from/file\"]\n"
+
+	if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("UN_SONARR_0_PATHS", "/from/env,/mnt/tv")
+
+	unpack := New()
+	unpack.ConfigFile = conf
+
+	if _, _, _, err := unpack.unmarshalConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := unpack.Sonarr["0"]
+	if got == nil || len(got.Paths) != 2 || got.Paths[0] != "/from/env" || got.Paths[1] != "/mnt/tv" {
+		t.Fatalf("live paths %+v", got)
+	}
+
+	if unpack.envUsed["SONARR_0_PATHS"] != "/from/env,/mnt/tv" {
+		t.Fatalf("env used %+v", unpack.envUsed)
+	}
+
+	file := unpack.fileConfig.Sonarr["0"]
+	if file == nil || len(file.Paths) != 1 || file.Paths[0] != "/from/file" {
+		t.Fatalf("file snapshot %+v", file)
+	}
+}
+
+// PATHS_0 wins when the comma form is also set.
+func TestUnmarshalIndexedStarrPathsWinOverComma(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "unpackerr.conf")
+	body := "[webserver]\nlisten_addr = \"127.0.0.1:0\"\nui_password = \"\"\n" +
+		"[sonarr.0]\nurl = \"http://sonarr:8989\"\napi_key = \"" + strings.Repeat("b", 32) + "\"\n"
+
+	if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("UN_SONARR_0_PATHS", "/from/comma")
+	t.Setenv("UN_SONARR_0_PATHS_0", "/from/index")
+
+	unpack := New()
+	unpack.ConfigFile = conf
+
+	if _, _, _, err := unpack.unmarshalConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := unpack.Sonarr["0"]
+	if got == nil || len(got.Paths) != 1 || got.Paths[0] != "/from/index" {
+		t.Fatalf("live paths %+v", got)
+	}
+}
+
 func TestUnmarshalConfigKeepsFileInstanceFieldsAcrossEnvURL(t *testing.T) {
 	dir := t.TempDir()
 	conf := filepath.Join(dir, "unpackerr.conf")
@@ -375,6 +491,11 @@ func TestUnmarshalConfigENVRolesAndAPIKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Startup validates API keys after filepath: expansion.
+	if err := unpack.Webserver.validateAuth(); err != nil {
+		t.Fatal(err)
+	}
+
 	if unpack.envUsed["WEBSERVER_ROLES_stats_PERMISSIONS_0"] != PermReadSystemStats {
 		t.Fatalf("env used mixed-case role key: %+v", unpack.envUsed)
 	}
@@ -404,6 +525,62 @@ func TestUnmarshalConfigENVRolesAndAPIKeys(t *testing.T) {
 	}
 }
 
+func TestUnmarshalConfigENVFilepathAPIKey(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "unpackerr.conf")
+	secretPath := filepath.Join(dir, "metrics-key")
+	key := strings.Repeat("a", 96)
+
+	if err := os.WriteFile(conf, []byte("[webserver]\nlisten_addr = \"127.0.0.1:0\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(secretPath, []byte(key), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("UN_WEBSERVER_ROLES_metrics_PERMISSIONS_0", PermReadSystemStats)
+	t.Setenv("UN_WEBSERVER_API_KEYS_0_NAME", "prometheus")
+	t.Setenv("UN_WEBSERVER_API_KEYS_0_KEY", "filepath:"+secretPath)
+	t.Setenv("UN_WEBSERVER_API_KEYS_0_ROLES_0", "metrics")
+
+	unpack := New()
+	unpack.ConfigFile = conf
+
+	if _, _, _, err := unpack.unmarshalConfig(); err != nil {
+		t.Fatalf("loading environment config before expansion: %v", err)
+	}
+
+	// Startup must not validate the unexpanded filepath reference.
+	if unpack.Webserver.keyPerms != nil {
+		t.Fatal("webserver permissions were built before filepath expansion")
+	}
+
+	if unpack.Webserver.APIKeys[0].Key != "filepath:"+secretPath {
+		t.Fatal("environment API key should remain a filepath reference before parsing")
+	}
+
+	// Use the same generic filepath expansion used by Sonarr/Radarr API keys.
+	if _, err := cnfgfile.Parse(unpack.Config, &cnfgfile.Opts{
+		Prefix:        filePrefix,
+		TransformPath: expandHomedir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unpack.Webserver.validateAuth(); err != nil {
+		t.Fatalf("validating expanded API key: %v", err)
+	}
+
+	if !unpack.Webserver.HasPermission(key, PermReadSystemStats) {
+		t.Fatal("expanded API key missing configured permission")
+	}
+
+	if got := unpack.fileConfig.Webserver.APIKeys; len(got) != 0 {
+		t.Fatalf("environment API key leaked into config snapshot: %+v", got)
+	}
+}
+
 func TestConfigTOMLTagsInSchema(t *testing.T) {
 	t.Parallel()
 
@@ -413,8 +590,7 @@ func TestConfigTOMLTagsInSchema(t *testing.T) {
 	}
 
 	skip := map[string]struct{}{
-		"path": {}, // legacy StarrConfig alias for paths
-		"key":  {}, // nested [[webserver.api_keys]]; parent api_keys is in the schema
+		"key": {}, // nested [[webserver.api_keys]]; parent api_keys is in the schema
 		// nested [hooks.titles]; parent titles is in the schema
 		"waiting":          {},
 		"queued":           {},
