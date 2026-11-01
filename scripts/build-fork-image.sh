@@ -36,8 +36,8 @@
 #   host-side copy, ~/build/unpackerr-two-context.Dockerfile on 10.0.0.120, is
 #   no longer read (set DOCKERFILE_SRC to use a different file).
 #
-#   ffmpeg is installed in the runtime stage and is a SILENT dependency: without
-#   it, splitting APE/WV/M4A/WAV CUE albums simply stops working. Nothing errors.
+#   The image carries no ffmpeg since HW-282: CUE splitting is upstream's
+#   pure-Go FLAC/APE path (set ape_format=flac for tagged FLAC from APE).
 #
 # USAGE
 #   scripts/build-fork-image.sh <version> [iteration]      # build only
@@ -103,11 +103,6 @@ ssh "$DOCKER_HOST_SSH" "cd $CTX && docker build -f Dockerfile.build \
     --build-arg BRANCH='$BRANCH' \
     --build-arg BUILD_DATE='$BUILD_DATE' \
     -t $IMAGE:$VERSION ."
-
-# ffmpeg's absence is invisible at runtime, so prove it is in the image we just built.
-echo "verifying ffmpeg is present in $IMAGE:$VERSION"
-ssh "$DOCKER_HOST_SSH" "docker run --rm --entrypoint /bin/sh $IMAGE:$VERSION -c 'command -v ffmpeg'" \
-    || die "ffmpeg missing from the built image - split_flac would be silently dead"
 
 if [ "$PUSH" = "1" ]; then
     ssh "$DOCKER_HOST_SSH" "docker push $IMAGE:$VERSION"

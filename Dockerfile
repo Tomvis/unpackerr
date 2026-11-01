@@ -47,8 +47,7 @@ RUN GOARM="${TARGETVARIANT#v}" go build -trimpath -tags osusergo,netgo \
 
 FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
-# ffmpeg (enhanced fork): required to split APE/WV/M4A/WAV CUE albums.
-RUN apk add --no-cache ca-certificates openssl tzdata curl jq ffmpeg
+RUN apk add --no-cache ca-certificates openssl tzdata curl jq
 
 COPY --from=builder --chmod=755 /unpackerr /unpackerr
 

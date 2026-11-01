@@ -31,7 +31,7 @@ require (
 require (
 	github.com/Unpackerr/iso9660 v0.0.3 // indirect
 	github.com/akavel/rsrc v0.10.2 // indirect
-	github.com/andybalholm/brotli v1.2.6 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.5 // indirect
@@ -40,9 +40,6 @@ require (
 	github.com/cavaliergopher/rpm v1.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dchest/jsmin v1.0.0 // indirect
-	github.com/go-flac/flacpicture/v2 v2.0.2 // indirect
-	github.com/go-flac/flacvorbis/v2 v2.0.2 // indirect
-	github.com/go-flac/go-flac/v2 v2.0.4 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/icza/bitio v1.1.0 // indirect
@@ -77,5 +74,5 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 
-// Enhanced fork: build against the sibling xtractr checkout (multi-format CUE splitting).
+// Enhanced fork: build against the sibling xtractr checkout (CUE charset/skip fixes, HW-126/HW-282).
 replace golift.io/xtractr => ../xtractr

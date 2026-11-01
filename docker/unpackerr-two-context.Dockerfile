@@ -72,9 +72,8 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}" \
 
 COPY --from=builder /tmp/unpackerr /unpackerr
 # Make sure we have an ssl cert chain and timezone data.
-# ffmpeg (enhanced fork): required to split APE/WV/M4A/WAV CUE albums.
 # Dropping it does NOT fail the build - split_flac just goes silently dead.
-RUN apk add --no-cache ca-certificates openssl tzdata curl jq ffmpeg
+RUN apk add --no-cache ca-certificates openssl tzdata curl jq
 
 ENV TZ=UTC
 

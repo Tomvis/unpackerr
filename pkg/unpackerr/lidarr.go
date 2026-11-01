@@ -95,23 +95,18 @@ func (l *LidarrConfig) hasQueueTitle(name string) bool {
 
 func (l *LidarrConfig) tweakExtract(item *Extract, rec queueView) {
 	item.SplitFlac = l.SplitFlac
-	// Fork: an unset ape_format keeps xtractr's ffmpeg path (tagged FLAC with art) for APE,
-	// .wv, .m4a and .wav images. Any APE option reaching xtractr selects upstream's decoder,
-	// and validateSettings turns compression 0 into 2000, so forward both only when chosen.
-	if l.APEFormat != "" {
-		item.APEFormat = xtractr.AudioFormat(l.APEFormat)
-		item.APECompression = l.APECompression
-	}
+	item.APEFormat = xtractr.AudioFormat(l.APEFormat)
+	item.APECompression = l.APECompression
 	item.OutputPath = rec.OutputPath
 }
 
 func (l *LidarrConfig) logExtra() string {
 	format := l.APEFormat
 	if format == "" {
-		format = "flac(ffmpeg)"
+		format = "ape"
 	}
 
-	return fmt.Sprintf(", split_flac(flac,ape,wv,m4a,wav):%v, ape_format:%s, ape_compression:%d",
+	return fmt.Sprintf(", split_flac:%v, ape_format:%s, ape_compression:%d",
 		l.SplitFlac, format, l.APECompression)
 }
 

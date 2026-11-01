@@ -9,9 +9,10 @@ which cannot resolve inside a single-repo context, so upstream's `Dockerfile` an
     <ctx>/xtractr     git archive HEAD of the sibling xtractr fork (branch enhanced)
 
 `scripts/build-fork-image.sh <version>` stages both trees from the Mac onto the
-Docker host (10.0.0.120, `~/build/unp-ctx`), builds with this file, and checks
-that ffmpeg is in the image (`PUSH=1` pushes). ffmpeg is a silent dependency:
-without it split_flac stops splitting APE/WV/M4A/WAV CUE albums and nothing errors.
+Docker host (10.0.0.120, `~/build/unp-ctx`) and builds with this file (`PUSH=1`
+pushes). Since HW-282 the image has no ffmpeg: xtractr's fork only adds CUE
+charset decoding and skips sheets it cannot split (per-track, missing or
+WV/M4A/WAV images). APE images need `ape_format = "flac"` for tagged FLAC.
 
 ## Where the sources live
 
